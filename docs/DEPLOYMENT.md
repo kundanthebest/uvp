@@ -49,7 +49,7 @@ Edit the example values for your lab. The launcher must return after starting QE
 -qmp unix:/run/uvp-hmlm/source.qmp,server=on,wait=off
 ```
 
-The bridge checks the executable and QMP peer PID. Preparation expects the destination QMP status `inmigrate` and the source status `running`. For a destination using deferred incoming migration, run the usual incoming setup in its launcher. Host configurations, privileged scripts and their parent directories must have trusted ownership and permissions.
+The bridge checks the executable and QMP peer PID to identify the VM it will prepare or migrate. The eBPF checkpoint discovers its own target from command submission. Preparation expects the destination QMP status `inmigrate` and the source status `running`. For a destination using deferred incoming migration, run the usual incoming setup in its launcher. Host configurations, privileged scripts and their parent directories must have trusted ownership and permissions.
 
 ## Configure the cross-host migration script
 
@@ -99,9 +99,9 @@ Open `http://127.0.0.1:8000/forms`. The browser asks for HTTP Basic credentials.
 2. Choose **Suspend** on the source, configure the hold and checkpoint deadlines, and choose automatic or manual release. For an initial hardware check, use the no-op profile.
 3. For the reset experiment, set the correct host character device in the source reset profile’s arguments and enable that profile in the hardware configuration before starting the controller. Reprepare after a restart. Select the source reset profile.
 4. Choose **Load eBPF hook and UVP daemon**. Use **Refresh status** until the daemon reports `ARMED`. **Start live migration** runs the configured migration script with the destination IP.
-5. The daemon confirms the issuing process group is stopped before running the reset. Automatic release follows a successful action. Check the daemon events and migration script exit, then run your guest I/O and data-integrity check on the destination.
+5. Inspect the captured issuer TGID and TID in the checkpoint events. The daemon confirms that the issuing process’s threads have stopped before running the reset. Automatic release follows a successful action. Check the migration script exit, then run your guest I/O and data-integrity check on the destination.
 
-For Get, use the source. For Set and Resume, use the destination. For a custom NVMe command, provide a supported issuer, opcode, queue, and any required masks. A PF reset can affect multiple VFs. Namespace deletion permanently removes the configured lab namespace and requires the exact displayed controller and NSID as acknowledgement. [Command matching](GENERIC_HOOKS.md)
+For Get, use the source. For Set and Resume, use the destination. For a custom NVMe command, select the trigger host, controller, opcode, queue and any required masks. The first matching synchronous submission on that host claims the checkpoint. A PF reset can affect multiple VFs. Namespace deletion permanently removes the configured lab namespace and requires the exact displayed controller and NSID as acknowledgement. [Command matching](GENERIC_HOOKS.md)
 
 ## Manual host operations and recovery
 
@@ -112,7 +112,7 @@ For Get, use the source. For Set and Resume, use the destination. For a custom N
 | Either | `sudo /opt/uvp-orchestrator/scripts/host-preflight.sh` |
 | Source | `sudo /opt/uvp-orchestrator/scripts/migrate.sh DESTINATION_IP` |
 
-These commands use the same root-owned configuration as the UI. Choose one migration initiator for the run.
+These commands use the same root-owned configuration as the UI. Choose one migration initiator for the run. Each Linux host accepts one armed hardware checkpoint at a time, including across different controllers, because the same process may issue commands to several controllers.
 
 Disarm cancels the checkpoint and releases its owned stop. A migration already in progress follows its own lifetime. The daemon watchdog provides bounded release on failure. SIGCONT allows the issuing process to run again. Device recovery, namespace reconstruction, QMP state and the guest workload are separate concerns. Inspect both hosts before repeating a test after a reset, timeout, disconnection or failed migration.
 

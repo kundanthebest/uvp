@@ -15,7 +15,6 @@
       ],
       "daemon": "/opt/uvp-control/vendor/uvp-live-fio/bin/uvp-daemon",
       "bpf": "/opt/uvp-control/vendor/uvp-live-fio/bin/hooks.bpf.o",
-      "pid": 0,
       "controller": "/dev/nvme0",
       "cntlid": 1
     },
@@ -32,7 +31,6 @@
       ],
       "daemon": "/opt/uvp-control/vendor/uvp-live-fio/bin/uvp-daemon",
       "bpf": "/opt/uvp-control/vendor/uvp-live-fio/bin/hooks.bpf.o",
-      "pid": 0,
       "controller": "/dev/nvme0",
       "cntlid": 2
     }

@@ -22,6 +22,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/file.h>
+#include <sys/mman.h>
 #include <sys/prctl.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
@@ -46,13 +47,21 @@ static int print_bpf(enum libbpf_print_level level, const char *fmt, va_list arg
     if (level == LIBBPF_DEBUG && !verbose) return 0;
     return vfprintf(stderr, fmt, args);
 }
+/* The synthetic producer shares its control record with the watchdog, just
+ * as the live producer publishes its record in the control BPF map. */
+struct mock_maps {
+    struct uvp_control control;
+    unsigned int permit;
+};
 struct app {
     struct uvp_config cfg;
     struct uvp_event event;
     struct bpf_object *obj;
     struct bpf_link *links[6];
     struct ring_buffer *rb;
-    int config_fd, control_fd, stats_fd, pidfd, lockfd, wdpipe;
+    int config_fd, control_fd, permit_fd, issuers_fd, stats_fd, pidfd, mockfd, lockfd, wdpipe;
+    struct mock_maps *mock_maps;
+    __u64 owner;
     pid_t pid, worker, watchdog, mock;
     unsigned int timeout_s, action_timeout_s, hold_ms, hold_timeout_s;
     unsigned int host_argc;
@@ -73,7 +82,7 @@ static unsigned int number(const char *s, unsigned int min, unsigned int max)
 }
 static void usage(FILE *f)
 {
-    fprintf(f, "uvp-daemon --pid PID --case 1|2|3|4|5 --controller /dev/nvmeN\n"
+    fprintf(f, "uvp-daemon --case 1|2|3|4|5 --controller /dev/nvmeN\n"
         "  [--cntlid ID] [--phase-symbol NAME] [--bpf FILE] [--timeout SEC]\n"
         "  [--action-timeout SEC] [--hold-ms MS] [--ready-file FILE] [--debug]\n"
         "  [--control-stdin --hold-timeout SEC]\n"
@@ -82,6 +91,7 @@ static void usage(FILE *f)
         "    [--nsid VALUE --nsid-mask MASK] [--cdw10 VALUE --cdw10-mask MASK]\n"
         "    [--cdw11 VALUE --cdw11-mask MASK] (masks default to 0: wildcard)\n"
         "  -- /absolute/action-script [args...]\n\n"
+        "The matching NVMe submission supplies the issuer TGID and TID.\n"
         "--selftest --case N -- /bin/true: synthetic event, no BPF/NVMe/VM.\n"
         "Case 5 without --phase-symbol gates synchronous native NVMe passthrough\n"
         "ioctls only; no io_uring, compat ioctls, or background I/O support.\n"
@@ -94,11 +104,11 @@ static int parse(struct app *a, int argc, char **argv)
     int x;
     const char *controller = NULL;
     bool have_opcode = false, have_queue = false, custom_options = false;
-    enum {PID=1000, CASE, CONTROLLER, CNTLID, SYMBOL, BPF, TIMEOUT, ACTIONTIME,
+    enum {CASE=1000, CONTROLLER, CNTLID, SYMBOL, BPF, TIMEOUT, ACTIONTIME,
           HOLD, READY, DEBUG, SELFTEST, INTERACTIVE, HOLDTIME, HOSTPROGRAM, HOSTARG,
           OPCODE, QUEUE, NSID, NSID_MASK, CDW10, CDW10_MASK, CDW11, CDW11_MASK};
     static const struct option opts[] = {
-        {"pid",1,0,PID}, {"case",1,0,CASE}, {"controller",1,0,CONTROLLER},
+        {"case",1,0,CASE}, {"controller",1,0,CONTROLLER},
         {"cntlid",1,0,CNTLID}, {"phase-symbol",1,0,SYMBOL}, {"bpf",1,0,BPF},
         {"timeout",1,0,TIMEOUT}, {"action-timeout",1,0,ACTIONTIME},
         {"hold-ms",1,0,HOLD}, {"ready-file",1,0,READY}, {"debug",0,0,DEBUG},
@@ -115,7 +125,6 @@ static int parse(struct app *a, int argc, char **argv)
     a->cfg.cntlid = UINT_MAX; a->hold_timeout_s = 60;
     while ((x=getopt_long(argc,argv,"+h",opts,NULL)) != -1) {
         switch (x) {
-        case PID: a->pid = number(optarg,2,INT_MAX); break;
         case CASE: a->cfg.testcase = number(optarg,1,5); break;
         case CONTROLLER: controller = optarg; break;
         case CNTLID: a->cfg.cntlid = number(optarg,0,65535); break;
@@ -167,7 +176,7 @@ static int parse(struct app *a, int argc, char **argv)
     if (a->host_argc && !a->interactive) return -1;
 #ifdef UVP_NO_BPF
     if (!a->selftest) {
-        fprintf(stderr,"This test-only binary cannot load BPF or target QEMU.\n");
+        fprintf(stderr,"This test-only binary cannot load BPF or attach to live NVMe commands.\n");
         return -1;
     }
 #endif
@@ -178,14 +187,12 @@ static int parse(struct app *a, int argc, char **argv)
             "bin/hooks.bpf.o" : UVP_INSTALLED_BPF;
     if (!a->selftest) {
         char extra;
-        if (geteuid() != 0 || !a->pid || !controller ||
+        if (geteuid() != 0 || !controller ||
             a->cfg.cntlid == UINT_MAX ||
             sscanf(controller,"/dev/nvme%u%c", &a->cfg.ctrl_instance,&extra)!=1) {
-            fprintf(stderr,"Need root, QEMU host TGID, /dev/nvmeN and CNTLID.\n");
+            fprintf(stderr,"Need root, /dev/nvmeN and a case-appropriate controller selector.\n");
             return -1;
         }
-    } else if (a->pid) {
-        fprintf(stderr,"--selftest cannot target an existing process.\n"); return -1;
     }
     return 0;
 }
@@ -194,7 +201,8 @@ static int on_event(void *arg, void *data, size_t size)
     struct app *a = arg;
     const struct uvp_event *e = data;
     if (size != sizeof(*e) || e->version != UVP_VERSION ||
-        e->tgid != (unsigned int)a->pid || e->testcase != a->cfg.testcase ||
+        e->tgid <= 1 || e->tgid > INT_MAX || !e->tid || e->tid > INT_MAX ||
+        !e->start_ns || !e->cookie || e->testcase != a->cfg.testcase ||
         e->epoch != a->cfg.epoch || e->cntlid != a->cfg.cntlid ||
         e->ctrl_instance != a->cfg.ctrl_instance || a->got_event) return 0;
     a->event = *e; a->got_event = true;
@@ -236,8 +244,14 @@ static int load_bpf(struct app *a)
     if (bpf_object__load(a->obj)) return -1;
     a->config_fd=bpf_object__find_map_fd_by_name(a->obj,"config");
     a->control_fd=bpf_object__find_map_fd_by_name(a->obj,"control");
+    a->permit_fd=bpf_object__find_map_fd_by_name(a->obj,"permit");
+    a->issuers_fd=bpf_object__find_map_fd_by_name(a->obj,"issuers");
     a->stats_fd=bpf_object__find_map_fd_by_name(a->obj,"stats");
-    if (a->config_fd<0 || a->control_fd<0 || a->stats_fd<0) return -1;
+    if (a->config_fd<0 || a->control_fd<0 || a->permit_fd<0 ||
+        a->issuers_fd<0 || a->stats_fd<0) {
+        fprintf(stderr,"Missing submission-issuer maps. Install the matching hooks.bpf.o.\n");
+        return -1;
+    }
     if (attach_one(a,0,"on_enter","trace","sys_enter") ||
         (a->cfg.use_wrapper && attach_one(a,1,"phase_enter","entry",a->symbol)) ||
         (a->cfg.use_wrapper && attach_one(a,2,"phase_return","return",a->symbol)) ||
@@ -255,13 +269,56 @@ static void disarm(struct app *a)
     if (a->config_fd>=0 && bpf_map_update_elem(a->config_fd,&zero,&a->cfg,BPF_ANY))
         fprintf(stderr,"WARN: cannot disarm config map: %s\n",strerror(errno));
 }
-static int stop_intent(struct app *a)
+static int read_control_map(struct app *a, struct uvp_control *c)
 {
-    struct uvp_control c = {};
     unsigned int zero=0;
-    if (a->selftest) return a->own_stop;
-    return a->control_fd>=0 && !bpf_map_lookup_elem(a->control_fd,&zero,&c) &&
-           c.request_ns && c.signal_rc==0;
+    if (!a->selftest) return bpf_map_lookup_elem(a->control_fd,&zero,c);
+    const struct uvp_control *mock=&a->mock_maps->control;
+    /* request_ns publishes the immutable mock identity. */
+    c->request_ns=__atomic_load_n(&mock->request_ns,__ATOMIC_ACQUIRE);
+    if (!c->request_ns) return 0;
+    c->pid_tgid=mock->pid_tgid;
+    c->start_ns=mock->start_ns;
+    c->cookie=mock->cookie;
+    c->epoch=mock->epoch;
+    c->fired=mock->fired;
+    c->signal_rc=__atomic_load_n(&mock->signal_rc,__ATOMIC_ACQUIRE);
+    return 0;
+}
+
+/* Userspace and the exit hook compete for exactly one permission to stop.
+ * Deleting it fences a hook that already read the old enabled config. */
+static int take_permit(struct app *a)
+{
+    unsigned int zero=0;
+    if (a->selftest) return __atomic_exchange_n(&a->mock_maps->permit,0,__ATOMIC_ACQ_REL);
+    if (!bpf_map_delete_elem(a->permit_fd,&zero)) return 1;
+    return errno==ENOENT ? 0 : -1;
+}
+
+static int pin_issuer(struct app *a, const struct uvp_control *c)
+{
+    __u32 tgid=c->pid_tgid>>32, tid=(__u32)c->pid_tgid;
+    __u64 marker=0;
+    if (tgid<=1 || tgid>INT_MAX || !tid || tid>INT_MAX ||
+        !c->start_ns || !c->cookie || c->epoch!=a->cfg.epoch) return -1;
+    if (a->pidfd>=0)
+        return a->owner==c->pid_tgid && !pidfd_exited(a->pidfd) ? 0 : -1;
+    int fd=a->selftest ? fcntl(a->mockfd,F_DUPFD_CLOEXEC,3) : open_pidfd((pid_t)tgid);
+    if (fd<0) return -1;
+    /* Looking up task-local storage by pidfd verifies the same kernel task
+     * even if a numeric TGID is recycled within a single /proc clock tick. */
+    bool matches=a->selftest ? (tgid==(unsigned int)a->mock) :
+        (!bpf_map_lookup_elem(a->issuers_fd,&fd,&marker) && marker==a->cfg.epoch);
+    if (!matches || pidfd_exited(fd)) {
+        close(fd);
+        errno=ESRCH;
+        return -1;
+    }
+    a->pid=(pid_t)tgid;
+    a->pidfd=fd;
+    a->owner=c->pid_tgid;
+    return 0;
 }
 static int write_pipe_byte(int fd, char byte)
 {
@@ -286,8 +343,42 @@ static int close_watchdog_pipe(struct app *a)
     a->wdpipe = -1;
     return rc;
 }
-/* Independent bounded-hold watchdog. Release does not undo a host action.
- * It never kills QEMU. It does NOT recover kernel/hardware hangs. */
+/* The watchdog has its own map descriptors. It can recover without an
+ * event, without a live daemon, and without an operator-provided PID. */
+static void recover_stop(struct app *a)
+{
+    struct uvp_control c={};
+    disarm(a);
+    int permission=take_permit(a);
+    if (permission>0) {
+        fprintf(stderr,"WATCHDOG: disarmed before any issuer stop\n");
+        return;
+    }
+    if (permission<0) { perror("watchdog stop permit"); return; }
+    /* The non-sleeping exit hook published the identity and intent before
+     * deleting the permit. Wait for its helper result, including errors. */
+    do {
+        if (read_control_map(a,&c) || !c.request_ns || c.epoch!=a->cfg.epoch) {
+            fprintf(stderr,"WATCHDOG: cannot read claimed stop identity\n");
+            return;
+        }
+        if (c.signal_rc!=-EINPROGRESS) break;
+        if (a->selftest) break; /* The dead parent was the synthetic producer. */
+        sleep_ms(1);
+    } while (true);
+    if (c.signal_rc && !(a->selftest && c.signal_rc==-EINPROGRESS)) return;
+    if (pin_issuer(a,&c)) {
+        fprintf(stderr,"WATCHDOG: original issuer exited or identity unavailable\n");
+        return;
+    }
+    uint64_t until=now_ms()+5000;
+    while (!all_threads_stopped(a->pid) && !pidfd_exited(a->pidfd) &&
+           now_ms()<until) sleep_ms(20);
+    if (!pidfd_exited(a->pidfd)) {
+        fprintf(stderr,"WATCHDOG: releasing submission issuer tgid=%d; run invalid\n",a->pid);
+        if (signal_pidfd(a->pidfd,SIGCONT) && errno!=ESRCH) perror("watchdog SIGCONT");
+    }
+}
 static int start_watchdog(struct app *a)
 {
     int p[2];
@@ -296,34 +387,25 @@ static int start_watchdog(struct app *a)
     if (a->watchdog<0) { close(p[0]); close(p[1]); return -1; }
     if (!a->watchdog) {
         uint64_t intent_at=0;
-        bool parent_dead=false;
+        uint64_t limit=a->interactive ? (uint64_t)a->hold_timeout_s*1000+5000 : 10000;
         close(p[1]);
         signal(SIGINT,SIG_IGN); signal(SIGTERM,SIG_IGN);
         for (;;) {
             struct pollfd q={.fd=p[0],.events=POLLIN|POLLHUP};
-            char c=0;
-            poll(&q,1,100);
+            struct uvp_control c={};
+            char byte;
+            if (poll(&q,1,100)<0 && errno==EINTR) continue;
             if (q.revents) {
-                ssize_t n=read(p[0],&c,1);
-                if (n==1 && c=='D') _exit(0);
-                if (!n) parent_dead=true;
+                ssize_t n=read(p[0],&byte,1);
+                if (n==1 && byte=='D') _exit(0);
+                if (n==0) break;
             }
-            if (pidfd_exited(a->pidfd)) _exit(0);
-            /* Mock event is generated after fork: parent sends I explicitly. */
-            if (a->selftest && q.revents && c=='I') a->own_stop=true;
-            if (stop_intent(a) && !intent_at) intent_at=now_ms();
-            if (parent_dead || (intent_at && now_ms()-intent_at>(a->interactive ? (uint64_t)a->hold_timeout_s*1000+5000 : 10000))) {
-                disarm(a);
-                if (intent_at) {
-                    uint64_t until=now_ms()+5000;
-                    while (!all_threads_stopped(a->pid) && now_ms()<until &&
-                           !pidfd_exited(a->pidfd)) sleep_ms(20);
-                    fprintf(stderr,"WATCHDOG: release requested stop; run INVALID\n");
-                    signal_pidfd(a->pidfd,SIGCONT);
-                }
-                _exit(3);
-            }
+            if (!read_control_map(a,&c) && c.request_ns && !intent_at)
+                intent_at=now_ms();
+            if (intent_at && now_ms()-intent_at>=limit) break;
         }
+        recover_stop(a);
+        _exit(3);
     }
     close(p[0]); a->wdpipe=p[1]; return 0;
 }
@@ -339,6 +421,18 @@ static int wait_for_stop(struct app *a)
     }
     return -1;
 }
+static void export_action_context(const struct app *a)
+{
+    char value[32];
+    snprintf(value,sizeof(value),"%u",a->cfg.testcase);
+    setenv("UVP_TESTCASE",value,1);
+    snprintf(value,sizeof(value),"%d",a->pid);
+    setenv("UVP_ISSUER_TGID",value,1);
+    snprintf(value,sizeof(value),"%u",a->event.tid);
+    setenv("UVP_ISSUER_TID",value,1);
+    snprintf(value,sizeof(value),"%llu",(unsigned long long)a->cfg.epoch);
+    setenv("UVP_EPOCH",value,1);
+}
 /* Fork now, but worker cannot execute the guest command before release byte. */
 static int queue_action(struct app *a, int *releasefd)
 {
@@ -347,7 +441,7 @@ static int queue_action(struct app *a, int *releasefd)
     a->worker=fork();
     if (a->worker<0) { close(p[0]); close(p[1]); return -1; }
     if (!a->worker) {
-        char byte, value[40];
+        char byte;
         close(p[1]);
         if (a->wdpipe>=0) close(a->wdpipe);
         setpgid(0,0);
@@ -355,13 +449,8 @@ static int queue_action(struct app *a, int *releasefd)
         prctl(PR_SET_PDEATHSIG,SIGKILL);
         if (read(p[0],&byte,1)!=1 || byte!='G') _exit(125);
         close(p[0]);
-        snprintf(value,sizeof(value),"%u",a->cfg.testcase);
-        setenv("UVP_TESTCASE",value,1);
-        snprintf(value,sizeof(value),"%d",a->pid);
-        setenv("UVP_QEMU_TGID",value,1);
-        snprintf(value,sizeof(value),"%llu",(unsigned long long)a->cfg.epoch);
-        setenv("UVP_EPOCH",value,1);
-        puts("ACTION_EXEC: QEMU released; guest command may now wait for guest readiness");
+        export_action_context(a);
+        puts("ACTION_EXEC: issuer released; guest command may now wait for guest readiness");
         /* Keep action output off the machine-control stdout stream. */
         if (dup2(STDERR_FILENO,STDOUT_FILENO)<0) _exit(125);
         execvp(a->action[0],a->action);
@@ -435,7 +524,7 @@ static int interactive_hold(struct app *a)
             fprintf(stderr,"FAIL: control disconnected/cancelled\n"); return -1;
         }
         if (!all_threads_stopped(a->pid)) {
-            fprintf(stderr,"FAIL: QEMU left owned hold unexpectedly\n"); return -1;
+            fprintf(stderr,"FAIL: issuer left owned hold unexpectedly\n"); return -1;
         }
         if (c==1) return 0;
         if (c==2) {
@@ -457,13 +546,7 @@ static int interactive_hold(struct app *a)
                 int nullfd=open("/dev/null",O_RDONLY);
                 if (nullfd<0 || dup2(nullfd,STDIN_FILENO)<0) _exit(125);
                 close(nullfd);
-                char value[40];
-                snprintf(value,sizeof(value),"%u",a->cfg.testcase);
-                setenv("UVP_TESTCASE",value,1);
-                snprintf(value,sizeof(value),"%d",a->pid);
-                setenv("UVP_QEMU_TGID",value,1);
-                snprintf(value,sizeof(value),"%llu",(unsigned long long)a->cfg.epoch);
-                setenv("UVP_EPOCH",value,1);
+                export_action_context(a);
                 if (dup2(STDERR_FILENO,STDOUT_FILENO)<0) _exit(125);
                 execv(a->host_action[0],a->host_action);
                 perror("exec host action"); _exit(127);
@@ -490,7 +573,7 @@ static void cleanup(struct app *a)
 {
     disarm(a);
     if (a->worker>0) {
-        /* End the launched host-action group before resuming QEMU. A reset
+        /* End the launched host-action group before resuming the issuer. A reset
          * already accepted by hardware cannot be undone; a worker stuck in
          * uninterruptible kernel sleep can outlive this bounded cleanup. */
         kill(-a->worker,SIGKILL); kill(a->worker,SIGKILL);
@@ -506,8 +589,7 @@ static void cleanup(struct app *a)
         if (reaped==0 || (reaped<0 && errno!=ECHILD))
             fprintf(stderr,"WARN: action worker did not exit; inspect host/device state\n");
     }
-    if (!a->released && (a->own_stop || stop_intent(a))) {
-        /* Avoid leaving a paused QEMU behind on ordinary errors/interrupts. */
+    if (!a->released && a->own_stop && a->pidfd>=0) {
         wait_for_stop(a);
         fprintf(stderr,"CLEANUP: SIGCONT only to our registered target; run failed\n");
         if (signal_pidfd(a->pidfd,SIGCONT)) perror("cleanup SIGCONT");
@@ -515,7 +597,10 @@ static void cleanup(struct app *a)
     }
     close_watchdog_pipe(a);
     if (a->watchdog>0) waitpid(a->watchdog,NULL,0);
-    if (a->mock>0) { signal_pidfd(a->pidfd,SIGKILL); waitpid(a->mock,NULL,0); }
+    /* An unreaped child PID cannot be reused. */
+    if (a->mock>0) { kill(a->mock,SIGKILL); waitpid(a->mock,NULL,0); }
+    if (a->mockfd>=0) close(a->mockfd);
+    if (a->mock_maps) munmap(a->mock_maps,sizeof(*a->mock_maps));
     if (a->stats_fd>=0) {
         unsigned int i; __u64 value;
         const char *names[]={"syscalls","wrappers","submits","completions","events",
@@ -529,12 +614,48 @@ static void cleanup(struct app *a)
     if (a->pidfd>=0) close(a->pidfd);
     if (a->lockfd>=0) close(a->lockfd);
 }
+/* The synthetic mode exercises daemon loss on either side of the stop without
+ * attaching kernel probes. The test harness continues or kills this daemon. */
+static void selftest_pause(struct app *a, const char *stage)
+{
+    const char *requested=getenv("UVP_SELFTEST_PAUSE_AT");
+    if (!requested || strcmp(requested,stage)) return;
+    printf("SELFTEST_PAUSED stage=%s child=%d\n",stage,a->mock);
+    raise(SIGSTOP);
+}
+
+static int synthetic_submission(struct app *a)
+{
+    struct uvp_control *c=&a->mock_maps->control;
+    struct uvp_event e={.version=UVP_VERSION,.testcase=a->cfg.testcase,
+        .tgid=a->mock,.tid=a->mock,.epoch=a->cfg.epoch,.cookie=1,
+        .ctrl_instance=a->cfg.ctrl_instance,.cntlid=a->cfg.cntlid,
+        .submitted=1,.completed=1};
+    selftest_pause(a,"before-submit");
+    if (interrupted) return -1;
+    long hz=sysconf(_SC_CLK_TCK);
+    uint64_t ticks=process_start_ticks(a->mock);
+    if (hz<=0 || !ticks) return -1;
+    e.start_ns=(ticks/(unsigned long)hz)*1000000000ULL+
+               (ticks%(unsigned long)hz)*1000000000ULL/(unsigned long)hz;
+    c->pid_tgid=((__u64)e.tgid<<32)|e.tid;
+    c->start_ns=e.start_ns; c->cookie=e.cookie; c->epoch=e.epoch; c->fired=1;
+    __atomic_store_n(&c->signal_rc,-EINPROGRESS,__ATOMIC_RELAXED);
+    __atomic_store_n(&c->request_ns,1,__ATOMIC_RELEASE);
+    if (take_permit(a)!=1) return -1;
+    /* The synthetic hook targets only its own unreaped child. */
+    int rc=signal_pidfd(a->mockfd,SIGSTOP);
+    e.signal_rc=rc ? -errno : 0;
+    __atomic_store_n(&c->signal_rc,e.signal_rc,__ATOMIC_RELEASE);
+    selftest_pause(a,"before-event");
+    return rc || interrupted ? -1 : on_event(a,&e,sizeof(e));
+}
 int main(int argc,char **argv)
 {
-    struct app a = {.config_fd=-1,.control_fd=-1,.stats_fd=-1,.pidfd=-1,
+    struct app a = {.config_fd=-1,.control_fd=-1,.permit_fd=-1,.issuers_fd=-1,.stats_fd=-1,.pidfd=-1,.mockfd=-1,
                     .lockfd=-1,.wdpipe=-1};
     uint64_t deadline;
-    unsigned int zero=0;
+    unsigned int zero=0, one=1;
     int result=1, releasefd=-1;
     char lockpath[160];
     setvbuf(stdout,NULL,_IOLBF,0); setvbuf(stderr,NULL,_IOLBF,0);
@@ -545,54 +666,45 @@ int main(int argc,char **argv)
         a.mock=fork();
         if (!a.mock) { for (;;) pause(); }
         if (a.mock<0) return 1;
-        a.pid=a.mock; a.cfg.cntlid=1;
+        a.mockfd=open_pidfd(a.mock);
+        if (a.mockfd<0) { perror("selftest pidfd"); goto out; }
+        a.cfg.cntlid=1;
+        a.mock_maps=mmap(NULL,sizeof(*a.mock_maps),PROT_READ|PROT_WRITE,
+                         MAP_SHARED|MAP_ANONYMOUS,-1,0);
+        if (a.mock_maps==MAP_FAILED) { a.mock_maps=NULL; goto out; }
+        a.mock_maps->permit=1;
         puts("SELFTEST: synthetic event only; no BPF, NVMe, QEMU or guest fio");
-    }
-    a.pidfd=open_pidfd(a.pid);
-    if (a.pidfd<0 || check_process(a.pid) || pidfd_exited(a.pidfd) ||
-        all_threads_stopped(a.pid)) {
-        fprintf(stderr,"Invalid, exited, traced, or already stopped target\n"); goto out;
-    }
-    if (a.selftest) snprintf(lockpath,sizeof(lockpath),"/tmp/uvp-fio-%u-%d.lock",getuid(),a.pid);
-    else {
+        snprintf(lockpath,sizeof(lockpath),"/tmp/uvp-fio-%u-%d.lock",getuid(),a.mock);
+    } else {
+        if (check_issuer_access()) goto out;
         if (mkdir("/run/uvp-live-fio",0700) && errno!=EEXIST) goto out;
-        snprintf(lockpath,sizeof(lockpath),"/run/uvp-live-fio/%d.lock",a.pid);
+        /* One process can submit to two controllers. Concurrent arms could
+         * otherwise release each other's process-wide job-control stop. */
+        snprintf(lockpath,sizeof(lockpath),"/run/uvp-live-fio/armed.lock");
     }
     a.lockfd=open(lockpath,O_CREAT|O_RDWR|O_CLOEXEC|O_NOFOLLOW,0600);
     if (a.lockfd<0 || flock(a.lockfd,LOCK_EX|LOCK_NB)) {
-        fprintf(stderr,"Another daemon owns this target or lock failed\n"); goto out;
+        fprintf(stderr,"Another UVP daemon is armed on this host or the lock failed\n"); goto out;
     }
-    a.cfg.start_ticks=process_start_ticks(a.pid);
-    a.cfg.clock_ticks=(unsigned int)sysconf(_SC_CLK_TCK);
-    if (!a.cfg.start_ticks || !a.cfg.clock_ticks) goto out;
-    a.cfg.tgid=a.pid; a.cfg.epoch=now_ms()*1000000ULL+(unsigned int)getpid();
+    a.cfg.epoch=now_ms()*1000000ULL+(unsigned int)getpid();
     if (!a.selftest && load_bpf(&a)) {
         fprintf(stderr,"BPF load/attach failed; no target was stopped\n"); goto out;
     }
+    if (!a.selftest && bpf_map_update_elem(a.permit_fd,&zero,&one,BPF_NOEXIST)) goto out;
     if (start_watchdog(&a)) goto out;
     a.cfg.enabled=1;
     if (!a.selftest && bpf_map_update_elem(a.config_fd,&zero,&a.cfg,BPF_ANY)) goto out;
-    printf("READY pid=%d case=%u phase=%s wrapper=%s\n",a.pid,a.cfg.testcase,
+    printf("READY case=%u issuer=auto phase=%s wrapper=%s\n",a.cfg.testcase,
            phases[a.cfg.testcase],a.symbol ? a.symbol : "native-nvme-ioctl");
     if (a.ready_path) {
         int fd=open(a.ready_path,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC,0600);
         if(fd<0) { perror("ready-file (remove stale file first)"); goto out; }
-        dprintf(fd,"pid=%d case=%u epoch=%llu\n",a.pid,a.cfg.testcase,
+        dprintf(fd,"issuer=auto case=%u epoch=%llu\n",a.cfg.testcase,
                 (unsigned long long)a.cfg.epoch); close(fd);
     }
     deadline=now_ms()+(uint64_t)a.timeout_s*1000;
-    if (a.selftest) {
-        a.event=(struct uvp_event){.version=UVP_VERSION,.testcase=a.cfg.testcase,
-            .tgid=a.pid,.tid=a.pid,.epoch=a.cfg.epoch,
-            .ctrl_instance=a.cfg.ctrl_instance,.cntlid=a.cfg.cntlid};
-        if (write_pipe_byte(a.wdpipe, 'I')) {
-            perror("watchdog stop-intent notification"); goto out;
-        }
-        a.own_stop=true;
-        if (signal_pidfd(a.pidfd,SIGSTOP)) goto out;
-        on_event(&a,&a.event,sizeof(a.event));
-    }
-    while(!a.got_event && !interrupted && now_ms()<deadline && !pidfd_exited(a.pidfd)) {
+    if (a.selftest && synthetic_submission(&a)) goto out;
+    while(!a.got_event && !interrupted && now_ms()<deadline) {
         if (a.interactive) {
             int command=read_control();
             if (command<0 || command==3) { interrupted=SIGTERM; break; }
@@ -613,7 +725,18 @@ int main(int argc,char **argv)
     if(a.event.reason || a.event.signal_rc) {
         fprintf(stderr,"FAIL: checkpoint rejected; later_mask means a coalesced transition\n"); goto out;
     }
+    struct uvp_control captured={};
+    __u64 event_owner=((__u64)a.event.tgid<<32)|a.event.tid;
+    if (read_control_map(&a,&captured) || !captured.fired || !captured.request_ns ||
+        captured.signal_rc || captured.pid_tgid!=event_owner ||
+        captured.start_ns!=a.event.start_ns || captured.cookie!=a.event.cookie ||
+        pin_issuer(&a,&captured)) {
+        fprintf(stderr,"FAIL: cannot verify the submitted command's issuer\n"); goto out;
+    }
     a.own_stop=true;
+    if (check_process(a.pid) || pidfd_exited(a.pidfd)) {
+        fprintf(stderr,"FAIL: issuer exited or is traced\n"); goto out;
+    }
     if(wait_for_stop(&a)) { fprintf(stderr,"FAIL: no confirmed group stop\n"); goto out; }
     printf("STOP_CONFIRMED pid=%d host_mono_ms=%llu\n",a.pid,(unsigned long long)now_ms());
     if (a.interactive) {

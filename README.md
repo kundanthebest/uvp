@@ -1,6 +1,6 @@
 # UVP — NVMe migration fault testing
 
-UVP pauses a running QEMU process after a selected NVMe command completes so you can run a controller reset, namespace deletion, or another configured action at that point in live migration. Operate both Linux PCs from a Windows browser.
+UVP pauses the process that submitted a selected NVMe command so you can run a controller reset, namespace deletion, or another configured action at that point in live migration. Select the command and action from a Windows browser. The eBPF submission hook discovers the issuer on the selected Linux PC.
 
 The Linux HTTP server, eBPF hooks, daemon and host helpers are C programs. Bash scripts handle orchestration, SSH, migration, and fault actions. The primary form at `/forms` works with JavaScript disabled. An optional interactive dashboard and standalone offline simulator use JavaScript in the browser.
 
@@ -53,7 +53,7 @@ ssh -N -L 8000:127.0.0.1:8000 uvp@CONTROLLER_IP
 | Resume | Destination | `nvmevf_cmd_resume_device` |
 | Custom NVMe command | Selected host | Synchronous command matched by opcode, queue and optional NSID/CDW masks |
 
-Each run arms one checkpoint. When the matched command completes, eBPF requests SIGSTOP at the issuing thread’s syscall exit and sends an event. The daemon confirms the group stop before executing the action on that host. Automatic release sends SIGCONT after action success. A later migration transition inside the same syscall invalidates the earlier checkpoint. The current generic adapter covers native x86-64 synchronous NVMe passthrough. [Hook semantics and supported commands](docs/GENERIC_HOOKS.md)
+Each run arms one checkpoint. The first matching submission records the process ID (TGID) and the submitting thread ID (TID). Completion can run on another CPU. Once the request completes successfully and the submitting thread exits the enclosing syscall, eBPF requests SIGSTOP and reports both IDs. The daemon confirms that the issuer’s threads have stopped before executing the host action. Automatic release sends SIGCONT after action success. A later migration transition inside the same syscall invalidates the earlier checkpoint. The generic adapter covers native x86-64 synchronous NVMe passthrough. [Hook semantics and supported commands](docs/GENERIC_HOOKS.md)
 
 ## Build and verify
 

@@ -27,7 +27,7 @@ def phases: [
   {id:5,name:"Custom NVMe command",host:"source",symbol:""}
 ];
 def only($keys): with_entries(select(.key as $k|$keys|index($k)));
-def public_hosts: with_entries(.value |= only(["transport","address","user","ssh_target","ssh_port","pid","controller","cntlid"]));
+def public_hosts: with_entries(.value |= only(["transport","address","user","ssh_target","ssh_port","controller","cntlid"]));
 def public_config: {mode,require_prepare:(.config.require_prepare == true),phases:phases,
   hosts:(.config.hosts|public_hosts),
   actions:((.config.actions // {})|with_entries(.value |= only(["label","kind","host","enabled","description","argv","destructive","confirmation","controller","nsid"]))),
@@ -59,8 +59,10 @@ def updated_hosts($req; $src; $dst):
     if ($user|type) != "string" or ($user|test("^[a-z_][a-z0-9_-]{0,31}\\z")|not)
     then invalid("Invalid SSH username") elif ($ctrl|valid_controller|not) then invalid("Invalid NVMe controller") else . end |
     (if $side == "source" then $src else $dst end) as $addr |
-    .[$side] += {user:$user,address:$addr,ssh_target:($user+"@"+$addr),controller:$ctrl,
-      pid:uint((if $v.pid=="" then 0 else field($v;"pid";0) end);0;2147483647;"PID"), ssh_port:uint(field($v;"ssh_port";22);1;65535;"SSH port"),
+    # Older clients sent a PID with host settings. Only the bridge identifies the
+    # prepared VM, and only the submission hook identifies the checkpoint issuer.
+    del(.[$side].pid) | .[$side] += {user:$user,address:$addr,ssh_target:($user+"@"+$addr),controller:$ctrl,
+      ssh_port:uint(field($v;"ssh_port";22);1;65535;"SSH port"),
       cntlid:uint(field($v;"cntlid";1);0;65535;"CNTLID")} |
     if $s.mode=="hardware" then .[$side].transport="ssh" else . end);
 
@@ -73,16 +75,17 @@ def selectors($s):
 
 def new_run($req; $id):
   ready_for_change |
+  if $req | has("pid") or has("tgid") or has("issuer_tgid") or has("issuer_tid")
+  then invalid("The NVMe submission hook discovers the issuer. Omit process IDs when arming.") else . end |
   if .config.require_prepare and .setup.status != "READY" then conflict("Prepare both hosts before loading hooks") else . end |
   .config as $cfg | uint(field($req;"case";1);1;5;"case") as $case | phases[$case-1] as $phase |
   (if $case == 5 then field($req;"target_host";"source") else $phase.host end) as $side |
   if $side != "source" and $side != "destination" then invalid("Invalid trigger host") else . end |
   $cfg.hosts[$side] as $h |
-  uint(field($req;"pid";$h.pid);2;2147483647;"Issuer PID") as $pid |
   field($req;"controller";$h.controller) as $ctrl |
   uint(field($req;"cntlid";$h.cntlid // 1);0;65535;"CNTLID") as $cntlid |
   if ($ctrl|valid_controller|not) then invalid("Expected an NVMe controller such as /dev/nvme0")
-  elif $case != 5 and $cfg.require_prepare and ($pid != $h.pid or $ctrl != $h.controller or $cntlid != $h.cntlid)
+  elif $case != 5 and $cfg.require_prepare and ($ctrl != $h.controller or $cntlid != $h.cntlid)
   then conflict("Save device settings and prepare hosts before changing the migration hook target") else . end |
   field($req;"automatic";false) as $automatic | field($req;"auto_resume";true) as $resume |
   if ($automatic|type) != "boolean" or ($resume|type) != "boolean" then invalid("Automatic controls must be booleans") else . end |
@@ -95,7 +98,7 @@ def new_run($req; $id):
   ($h.symbols[($case|tostring)] // $phase.symbol) as $symbol |
   if ($symbol|type) != "string" or ($case != 5 and $symbol == "") or ($symbol|test("^[A-Za-z0-9_.$]*\\z")|not)
   then invalid("Invalid configured wrapper symbol") else . end |
-  {id:$id,status:"STARTING",case:$case,phase:$phase.name,host:$side,pid:$pid,controller:$ctrl,cntlid:$cntlid,symbol:$symbol,
+  {id:$id,status:"STARTING",case:$case,phase:$phase.name,host:$side,pid:null,issuer_tgid:null,issuer_tid:null,controller:$ctrl,cntlid:$cntlid,symbol:$symbol,
     hold_seconds:uint(field($req;"hold_seconds";120);5;600;"hold_seconds"),
     checkpoint_seconds:uint(field($req;"checkpoint_seconds";300);5;86400;"checkpoint_seconds"),
     selectors:(if $case==5 then selectors(field($req;"selectors";{})) else {} end),
@@ -116,7 +119,13 @@ def new_job($req; $id):
   elif $p.kind == "migration" and (.run.status != "ARMED" or .run.migration_started)
   then conflict("Migration requires an ARMED checkpoint and can start once per run")
   elif $p.kind != "migration" and (.run.status|active) then conflict("This job requires an idle checkpoint")
-  else {id:$id,key:$key,label:$p.label,kind:$p.kind,status:"RUNNING",run_id:.run.id} end;
+  else {id:$id,key:$key,label:$p.label,kind:$p.kind,status:"RUNNING",run_id:.run.id} +
+    (if $p.bridge_verb=="migrate" then
+       if .setup.status=="READY" and .setup.hosts.source.pid!=null then {source_qmp_pid:.setup.hosts.source.pid}
+       elif .config.require_prepare then conflict("Prepare the source VM before starting migration")
+       else {} end
+     else {} end)
+  end;
 
 def controlled($id; $command):
   if .closing or .run.id != $id or (.run.status|active|not) then conflict("Run is stale or no longer active") else . end |

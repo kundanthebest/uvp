@@ -7,7 +7,7 @@
 #include <linux/ioctl.h>
 #include <linux/nvme_ioctl.h>
 
-#define UVP_VERSION 2
+#define UVP_VERSION 3
 #define UVP_CANCELLED 1U
 #define UVP_SEND 0x41
 #define UVP_RECV 0x42
@@ -35,14 +35,15 @@ struct nvme_wire {
 _Static_assert(sizeof(struct nvme_wire) == 64, "NVMe command size");
 
 struct uvp_config {
-    __u32 tgid, ctrl_instance, cntlid, testcase;
-    __u64 epoch, start_ticks;
-    __u32 enabled, debug, clock_ticks, pad;
+    __u32 ctrl_instance, cntlid, testcase, enabled;
+    __u64 epoch;
+    __u32 debug;
     __u32 opcode, queue, use_wrapper, nsid;
     __u32 nsid_mask, cdw10, cdw10_mask, cdw11, cdw11_mask;
 };
 struct uvp_gate {
     __u64 cookie, request, submit_ns, complete_ns, wrapper_ns;
+    __u64 start_ns, thread_start_ns;
     __s64 syscall_id;
     __s32 wrapper_rc;
     __u32 entered, inside, returned, submitted, completed;
@@ -52,15 +53,16 @@ struct uvp_gate {
     __u16 status;
     __u8 flags, pad;
 };
-struct uvp_owner { __u64 pid_tgid, cookie; };
+struct uvp_owner { __u64 pid_tgid, cookie, start_ns; };
 struct uvp_control {
-    __u32 fired;              /* 0=armed, 1=claimed (may be about to signal) */
+    __u32 fired;              /* one terminal exit for the elected submission */
     __s32 signal_rc;
-    __u64 request_ns;
+    __u64 request_ns;         /* nonzero only after publishing signal intent */
+    __u64 pid_tgid, start_ns, epoch, cookie;
 };
 struct uvp_event {
     __u32 version, testcase, tgid, tid;
-    __u64 epoch, cookie, submit_ns, complete_ns, wrapper_ns, exit_ns;
+    __u64 epoch, cookie, start_ns, submit_ns, complete_ns, wrapper_ns, exit_ns;
     __s64 syscall_id, syscall_ret;
     __u32 ctrl_instance, cntlid, submitted, completed, later_mask, reason;
     __s32 wrapper_rc, signal_rc;
@@ -71,6 +73,32 @@ struct uvp_event {
 };
 
 /* Shared by the BPF implementation and ordinary C unit tests. */
+static __inline int uvp_same_task_lifetime(const struct uvp_gate *gate,
+                                           __u64 leader_start_ns,
+                                           __u64 thread_start_ns)
+{
+    return gate->start_ns == leader_start_ns &&
+           gate->thread_start_ns == thread_start_ns;
+}
+static __inline int uvp_same_submission(const struct uvp_control *ctl,
+                                        __u64 pid_tgid, __u64 start_ns,
+                                        __u64 cookie, __u64 epoch)
+{
+    return ctl->pid_tgid == pid_tgid && ctl->start_ns == start_ns &&
+           ctl->cookie == cookie && ctl->epoch == epoch;
+}
+/* Native x86-64 synchronous VFIO migration entry points. */
+static __inline int uvp_wrapper_syscall(__s64 id)
+{
+    switch (id) {
+    case 0: case 1: case 16:               /* read, write, ioctl */
+    case 17: case 18: case 19: case 20:    /* pread64, pwrite64, readv, writev */
+    case 295: case 296: case 327: case 328: /* preadv/pwritev and v2 */
+        return 1;
+    default:
+        return 0;
+    }
+}
 static __inline int uvp_custom_match(const struct uvp_config *cfg,
                                     const struct nvme_wire *cmd,
                                     int is_admin)

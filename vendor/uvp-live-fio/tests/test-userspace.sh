@@ -6,7 +6,11 @@ work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 for tc in 1 2 3 4; do
     "${UVP_DAEMON:-$root/bin/uvp-daemon}" --selftest --case "$tc" --hold-ms 50 -- /bin/true >"$work/tc$tc" 2>&1
-    grep -q STOP_CONFIRMED "$work/tc$tc"
+    grep -Eq '^READY case=[1-4] issuer=auto ' "$work/tc$tc"
+    captured=$(sed -nE 's/^EVENT .* tgid=([0-9]+) tid=([0-9]+) .*/\1 \2/p' "$work/tc$tc")
+    read -r tgid tid <<<"$captured"
+    [[ $tgid =~ ^[1-9][0-9]*$ && $tgid == "$tid" ]]
+    grep -q "^STOP_CONFIRMED pid=$tgid " "$work/tc$tc"
     grep -q ACTION_ACKNOWLEDGED "$work/tc$tc"
     awk '/SIGCONT pid=/{released=1} /ACTION_EXEC:/{if(!released) exit 1}' "$work/tc$tc"
 done

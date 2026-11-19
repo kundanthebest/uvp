@@ -1,5 +1,11 @@
 # Changes
 
+## Automatic discovery of the NVMe command issuer
+
+- Arming takes the host, controller and command selector. The submission hook captures the first matching request’s TGID and TID. The completion hook uses the saved request identity, and only the submitting thread can trigger the stop at syscall exit.
+- The UI, run export and daemon events report the captured issuer. Migration preparation continues to verify the source and destination QEMU processes through QMP.
+- The daemon and eBPF object use ABI version 3. Rebuild and deploy both on each trigger host.
+
 ## Native controller and shell orchestration
 
 - Replaced the Linux HTTP service with a loopback C server. The server-rendered HTML forms work in a Windows browser with JavaScript disabled.

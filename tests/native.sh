@@ -129,7 +129,7 @@ if [[ $transport == http ]]; then
 fi
 request GET /api/config 200
 assert_json '.mode == "demo" and .require_prepare and (.phases | length) == 5 and (.hosts.source | has("identity_file") | not)'
-hosts='{"source":{"address":"192.0.2.10","user":"uvp","pid":0,"cntlid":1},"destination":{"address":"192.0.2.20","user":"uvp","pid":0,"cntlid":2}}'
+hosts='{"source":{"address":"192.0.2.10","user":"uvp","cntlid":1},"destination":{"address":"192.0.2.20","user":"uvp","cntlid":2}}'
 for change in '.destination.address="10.0.0.555"' '.destination.user="-unsafe"' '.source.ssh_port=0' '.destination.controller="/dev/nvme0n1"' '.source.extra=true'; do
     request POST /api/hosts 400 "$(jq -c "$change" <<<"$hosts")"
 done
@@ -144,11 +144,12 @@ prepare
 for invalid in '{"case":9}' '{"case":true}' '{"cntlid":1.5}' '{"hold_seconds":864000}' '{"automatic":"true"}' '{"host_action":"destination-custom"}' '{"host_action":"source-disabled"}' '{"case":5,"selectors":{"opcode":256}}' '{"case":5,"selectors":{"opcode":6,"cdw10_mask":4294967296}}' '{"case":5,"selectors":{"opcode":6,"queue":"all"}}' '{"host_action":"source-delete-ns","destructive_ack":"wrong"}'; do
     request POST /api/runs 400 "$invalid"
 done
-request POST /api/runs 409 '{"case":1,"pid":1999}'
+request POST /api/runs 400 '{"case":1,"pid":1999}'
 request POST /api/runs 409 '{"case":3,"controller":"/dev/nvme77"}'
 echo 'PASS: configuration, prerequisites, profiles, generic selectors and destructive action confirmation'
 arm '{"case":1,"automatic":true,"auto_resume":true,"host_action":"source-custom","guest_action":"source-fio","hold_seconds":15}'
 auto_rid=$rid
+assert_json '.run.issuer_tgid == null and .run.issuer_tid == null and .run.pid == null'
 request POST /api/prepare 409 '{}'
 request POST /api/hosts 409 "$hosts"
 request POST /api/runs 409 '{"case":1}'
@@ -160,11 +161,13 @@ assert_json '.run.host_action_status == "DONE" and .run.guest_action_status == "
 request POST /api/jobs 409 '{"job":"migrate"}'
 request GET "/api/runs/$rid/export" 200
 assert_json '(.events | length) > 5 and .run.automatic and ([.events[] | select(.message == "HOST_ACTION_STARTED")] | length) == 1'
+assert_json '.run.issuer_tgid == 31001 and .run.issuer_tid == 31002'
 echo 'PASS: one automatic action, release, separate migration result and event export'
 prepare
 arm '{"case":3,"automatic":false,"host_action":"destination-custom","hold_seconds":15}'
 migrate
 await_state '.run.status == "PAUSED"'
+assert_json '.run.issuer_tgid == 32001 and .run.issuer_tid == 32002'
 request POST "/api/runs/$rid/action" 200 '{}'
 await_state '.run.status == "PAUSED" and .run.host_action_status == "DONE"'
 request POST "/api/runs/$rid/action" 409 '{}'
@@ -172,8 +175,9 @@ request POST "/api/runs/$rid/resume" 200 '{}'
 await_state '.run.status == "DONE"'
 echo 'PASS: destination checkpoint, manual action exactly once, manual resume'
 prepare
-arm '{"case":5,"pid":12348,"target_host":"source","selectors":{"queue":"io","opcode":"0x02","nsid_mask":"0xffffffff"},"hold_seconds":15}'
+arm '{"case":5,"target_host":"source","selectors":{"queue":"io","opcode":"0x02","nsid_mask":"0xffffffff"},"hold_seconds":15}'
 cancel
+assert_json '.run.issuer_tgid == null and .run.issuer_tid == null'
 prepare
 arm '{"case":1,"host_action":"source-delete-ns","destructive_ack":"/dev/nvme0:1","automatic":true,"auto_resume":false,"hold_seconds":15}'
 migrate

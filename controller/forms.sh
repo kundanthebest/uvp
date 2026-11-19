@@ -68,7 +68,10 @@ mutate() {
             fi
             if [[ ${fields[op]} != hosts ]]; then call_api POST "/api/${fields[op]}" '{}'; fi ;;
         arm)
-            body=$(jq -c '{case:.phase,target_host:.target_host,host_action,guest_action,hold_seconds,checkpoint_seconds,destructive_ack,automatic:(.automatic=="on"),auto_resume:(.auto_resume=="on"),selectors:{opcode,queue,nsid,nsid_mask,cdw10,cdw10_mask,cdw11,cdw11_mask}} + (if (.pid // "") != "" then {pid} else {} end)' <<< "$data")
+            if [[ -n ${fields[pid]:-} ]]; then
+                status=400; message='UVP identifies the issuer at NVMe command submission. Reload this form to arm the checkpoint.'; return 1
+            fi
+            body=$(jq -c '{case:.phase,target_host:.target_host,host_action,guest_action,hold_seconds,checkpoint_seconds,destructive_ack,automatic:(.automatic=="on"),auto_resume:(.auto_resume=="on"),selectors:{opcode,queue,nsid,nsid_mask,cdw10,cdw10_mask,cdw11,cdw11_mask}}' <<< "$data")
             call_api POST /api/runs "$body" ;;
         migrate)
             [[ ${fields[id]:-} =~ ^[a-f0-9]{12}$ ]] || { status=409; message='Load the eBPF hook first.'; return 1; }

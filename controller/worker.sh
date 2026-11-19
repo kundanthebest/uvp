@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0-only
 # Run each long-lived operation outside the HTTP process. Only the local C
-# daemon attached on the selected host owns permission to stop/release QEMU.
+# daemon attached on the selected host owns the checkpoint issuer's stop.
 set -Eeuo pipefail
 umask 077
 source "$UVP_ROOT/controller/state.sh"
@@ -137,9 +137,7 @@ prepare_hosts() {
             fi
         fi
         lock_current
-        state_update --arg s "$side" --argjson result "$bridge_result" --arg verb "$operation" '
-            .setup.hosts[$s]=$result |
-            if $verb=="prepare" then .config.hosts[$s].pid=$result.pid else . end'
+        state_update --arg s "$side" --argjson result "$bridge_result" '.setup.hosts[$s]=$result'
         event setup "$side $operation confirmed" "$run_id"
         unlock_state
     done
@@ -152,7 +150,8 @@ prepare_hosts() {
     unlock_state
 }
 daemon_output() {
-    local tag=$1 line=$2 change=. cmd
+    local tag=$1 line=$2 change=. cmd tgid tid
+    local event_re='^EVENT case=([1-5]) phase=.+ tgid=([1-9][0-9]{0,9}) tid=([1-9][0-9]{0,9})( |$)'
     lock_current
     if [[ $tag != o ]]; then
         if [[ $tag == e ]]; then
@@ -165,11 +164,24 @@ daemon_output() {
     event daemon "$line" "$id"
     case $line in
         'READY '*) change='.run += {status:"ARMED",detail:"Hooks attached; start migration when ready"}';;
-        'HOLD_READY '*) change='.run += {status:"PAUSED",hold_deadline:(now+.run.hold_seconds),detail:"Owned QEMU stop confirmed"}';;
+        'EVENT '*)
+            if [[ ! $line =~ $event_re || ${BASH_REMATCH[1]} != "$case_id" ]]; then
+                error_detail='Daemon reported an invalid issuer event'; exit 1
+            fi
+            tgid=${BASH_REMATCH[2]}; tid=${BASH_REMATCH[3]}
+            if (( tgid < 2 || tid < 2 || tgid > 2147483647 || tid > 2147483647 )) || [[ $issuer_tgid ]]; then
+                error_detail='Daemon reported an invalid or repeated issuer identity'; exit 1
+            fi
+            issuer_tgid=$tgid
+            state_update --argjson tgid "$tgid" --argjson tid "$tid" '.run += {pid:$tgid,issuer_tgid:$tgid,issuer_tid:$tid}'
+            ;;
+        'HOLD_READY '*)
+            if [[ ! $issuer_tgid ]]; then error_detail='Daemon reported a hold before identifying the issuer'; exit 1; fi
+            change='.run += {status:"PAUSED",hold_deadline:(now+.run.hold_seconds),detail:"Issuing process stop confirmed"}';;
         HOST_ACTION_STARTED) change='.run += {status:"HOST_ACTION",host_action_status:"RUNNING"}';;
         HOST_ACTION_DONE) change='.run += {status:"PAUSED",host_action_status:"DONE",detail:"Host action completed; checkpoint remains held"}';;
         HOST_ACTION_FAILED*) change='.run += {host_action_status:"FAILED",detail:"Host action failed; daemon cleanup releases its target"}';;
-        'SIGCONT pid='*) change='.run += {status:"RELEASED",hold_deadline:null,detail:"QEMU released; guest runstate is not inferred"}';;
+        'SIGCONT pid='*) change='.run += {status:"RELEASED",hold_deadline:null,detail:"Issuing process released"}';;
         ACTION_EXEC:*) change='if .run.guest_action!="none" then .run.guest_action_status="WAITING FOR ACK" else . end';;
         ACTION_ACKNOWLEDGED:*) change='if .run.guest_action!="none" then .run.guest_action_status="ACKNOWLEDGED" else . end';;
         FAIL:*|WATCHDOG:*|RUN_FAILED*|CLEANUP:*) change='.run.detail=$line';;
@@ -195,16 +207,17 @@ daemon_output() {
     unlock_state
 }
 run_daemon() {
-    local host argv limit
+    local host argv limit case_id issuer_tgid=''
+    case_id=$(jq -r .case <<< "$object")
     if [[ $UVP_MODE == demo ]]; then
         mapfile -t COMMAND < <(jq -r --arg sim "$UVP_ROOT/controller/simulator.sh" \
-            '[$sim,.case,.pid,.checkpoint_seconds,.hold_seconds,.host_action,.guest_action][]' <<< "$object")
+            '[$sim,.case,.host,.checkpoint_seconds,.hold_seconds,.host_action,.guest_action][]' <<< "$object")
     else
         host=$(jq -c --argjson r "$object" '.hosts[$r.host]' <<< "$config")
         argv=$(jq -ce --argjson r "$object" '
             . as $c | .hosts[$r.host] as $h |
             ($h.privilege_prefix // []) +
-            [$h.daemon,"--pid",$r.pid,"--case",$r.case,"--controller",$r.controller,
+            [$h.daemon,"--case",$r.case,"--controller",$r.controller,
              "--cntlid",$r.cntlid,"--bpf",$h.bpf,"--timeout",$r.checkpoint_seconds,"--control-stdin",
              "--hold-timeout",$r.hold_seconds,"--action-timeout",($c.action_timeout//300)] +
             (if $r.symbol!="" then ["--phase-symbol",$r.symbol] else [] end) +
@@ -246,7 +259,8 @@ run_job() {
         transport_argv "$host" "$argv" || { error_detail='Invalid job or transport configuration'; exit 1; }
         if [[ $(jq -r '.bridge_verb // ""' <<< "$profile") == migrate ]]; then
             input_path=$(mktemp "$UVP_STATE_DIR/request.XXXXXXXX")
-            jq -c '{role:"source",destination_ip:.hosts.destination.address,expected_pid:.hosts.source.pid}' <<< "$config" >"$input_path"
+            jq -c --argjson job "$object" '{role:"source",destination_ip:.hosts.destination.address} +
+                (if $job.source_qmp_pid then {expected_pid:$job.source_qmp_pid} else {} end)' <<< "$config" >"$input_path"
             input_method=input; input_file=$input_path
         fi
         stream_command "$limit" "$input_method" "$input_file" job_output "${COMMAND[@]}"

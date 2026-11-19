@@ -13,6 +13,16 @@ jobs:
         run: make build CLANG=/usr/bin/clang
       - name: Test shell and C controller, host bridge and daemon
         run: make test
+      - name: Verify submitter identity on a kernel NVMe loopback controller
+        shell: bash
+        run: |
+          if ! modinfo nvme-loop >/dev/null 2>&1; then
+            extra="linux-modules-extra-$(uname -r)"
+            if apt-cache show "$extra" >/dev/null 2>&1; then sudo apt-get install -y "$extra"; fi
+          fi
+          rc=0
+          sudo bash tests/issuer-loop.sh || rc=$?
+          if (( rc == 77 )); then echo "::notice::Kernel NVMe loopback prerequisites unavailable"; else exit "$rc"; fi
       - name: Verify release and offline UI
         shell: bash
         run: |

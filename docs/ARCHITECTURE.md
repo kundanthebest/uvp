@@ -20,7 +20,7 @@ stateDiagram-v2
     CANCELLING --> CANCELLED: daemon exits
 ```
 
-The daemon owns the target pidfd. After an eligible syscall exit, it observes the target’s threads in the stopped state before it emits `HOLD_READY`. Its stdin accepts three control messages:
+At submission the hook records the issuer’s TGID, TID and process start time. At the matching thread’s syscall exit the daemon receives the event, verifies the process identity with a pidfd, and confirms that the issuer’s threads have stopped before it emits `HOLD_READY`. Its stdin accepts three control messages.
 
 | Message | Daemon behavior |
 |---|---|

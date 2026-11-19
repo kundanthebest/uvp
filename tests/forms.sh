@@ -48,6 +48,7 @@ await_state() {
 [[ $("${c[@]}" -o /dev/null -w '%{http_code}' "$url/forms") == 401 ]]
 "${c[@]}" "${auth[@]}" -f "$url/forms" -o "$tmp/page"
 grep -q 'Start live migration' "$tmp/page"
+if grep -Eq 'name="(source_|destination_)?pid"' "$tmp/page"; then echo 'Forms request a PID before command submission' >&2; exit 1; fi
 if grep -qi '<script' "$tmp/page"; then echo 'Executable browser script in the forms dashboard' >&2; exit 1; fi
 [[ $("${c[@]}" "${auth[@]}" -o /dev/null -w '%{http_code}' -H 'Origin: http://example.invalid' --data 'op=prepare' "$url/forms") == 403 ]]
 hostfields='source_address=192.0.2.10&source_user=uvp&source_ssh_port=22&source_controller=%2Fdev%2Fnvme0&source_cntlid=1&destination_address=192.0.2.20&destination_user=uvp&destination_ssh_port=22&destination_controller=%2Fdev%2Fnvme1&destination_cntlid=2'
@@ -62,6 +63,8 @@ rid=$(state | jq -er '.run.id')
 post /forms 409 'op=migrate&id=000000000000&job=migrate'
 post /forms 303 "op=migrate&id=$rid&job=migrate"
 await_state '.run.status=="DONE"'
+"${c[@]}" "${auth[@]}" -f "$url/forms" -o "$tmp/page"
+grep -Fq '<span id="issuer-identity">31001 / 31002</span>' "$tmp/page" || { echo 'Missing captured TGID/TID on forms dashboard' >&2; exit 1; }
 post /forms/export 200 "id=$rid"
-jq -e --arg rid "$rid" '.run.id==$rid and (.events|length)>0' "$tmp/body" >/dev/null
+jq -e --arg rid "$rid" '.run.id==$rid and .run.issuer_tgid==31001 and .run.issuer_tid==31002 and (.events|length)>0' "$tmp/body" >/dev/null
 echo 'PASS: authenticated HTML forms configure hosts, prepare, arm, migrate, release and export with no JavaScript'

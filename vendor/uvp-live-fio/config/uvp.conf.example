@@ -3,10 +3,7 @@
 RUN_ID="change-me"
 OUTPUT_DIR="/tmp/uvp-live-fio-results"
 
-# Exact host process IDs; read your existing source/DEST QEMU pidfiles.
-# Only the relevant PID is used: source for cases 1/2, destination for 3/4.
-SOURCE_QEMU_PID=0
-DEST_QEMU_PID=0
+# Local controller and target CNTLID. The submission hook discovers the issuer.
 SOURCE_CONTROLLER="/dev/nvme0"
 DEST_CONTROLLER="/dev/nvme0"
 SOURCE_CNTLID=1

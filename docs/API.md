@@ -21,8 +21,8 @@ Bodies for prepare/preflight/control endpoints are `{}`. Hosts body:
 
 ```json
 {
-  "source": {"address":"192.0.2.10","user":"uvp","ssh_port":22,"pid":0,"controller":"/dev/nvme0","cntlid":1},
-  "destination": {"address":"192.0.2.20","user":"uvp","ssh_port":22,"pid":0,"controller":"/dev/nvme0","cntlid":2}
+  "source": {"address":"192.0.2.10","user":"uvp","ssh_port":22,"controller":"/dev/nvme0","cntlid":1},
+  "destination": {"address":"192.0.2.20","user":"uvp","ssh_port":22,"controller":"/dev/nvme0","cntlid":2}
 }
 ```
 
@@ -32,20 +32,20 @@ Arm body for reset after source Suspend:
 
 ```json
 {
-  "case":1,"pid":12345,"controller":"/dev/nvme0","cntlid":1,
+  "case":1,"controller":"/dev/nvme0","cntlid":1,
   "hold_seconds":120,"checkpoint_seconds":300,
   "host_action":"source-nvme-reset","guest_action":"none",
   "automatic":true,"auto_resume":true
 }
 ```
 
-The action must be enabled in server configuration. `automatic` defaults to false for API compatibility; the UI explicitly selects true. `auto_resume` defaults to true and applies to automatic mode. For a destructive profile, also send `destructive_ack` equal to its configured `confirmation`, or `controller:NSID`. The supplied hardware profile requires preparation; cases 1–4 must use the PID/controller/CNTLID verified by preparation.
+The action must be enabled in server configuration. `automatic` defaults to false for API compatibility. The UI explicitly selects true. `auto_resume` defaults to true and applies to automatic mode. For a destructive profile, also send `destructive_ack` equal to its configured `confirmation`, or `controller:NSID`. The supplied hardware profile requires preparation. Cases 1–4 must use the prepared controller and CNTLID. Omit `pid` from all arm requests. Supplying a PID returns HTTP 400 because the hook discovers the issuer from the matched command submission.
 
 Case 5 adds `target_host` and explicit selectors, for example:
 
 ```json
 {
-  "case":5,"target_host":"source","pid":12345,
+  "case":5,"target_host":"source",
   "controller":"/dev/nvme0","cntlid":1,
   "selectors":{"opcode":"0x06","queue":"admin","nsid":0,"nsid_mask":0,"cdw10":1,"cdw10_mask":"0xff","cdw11":0,"cdw11_mask":0},
   "host_action":"none","automatic":true,"auto_resume":false
@@ -54,9 +54,11 @@ Case 5 adds `target_host` and explicit selectors, for example:
 
 Generic matching supports the synchronous paths documented in [GENERIC_HOOKS.md](GENERIC_HOOKS.md). Zero masks are wildcards. A server-controlled `hosts.SIDE.symbols["5"]` may name an audited synchronous wrapper. Browser text cannot choose an arbitrary symbol.
 
-Start migration with `{"job":"migrate"}` only after `ARMED`. The controller sends the destination IP and expected source PID to the source host bridge. It records script status separately from the checkpoint. Migration preparation is consumed at start: prepare again after restoring the VM/device setup for another run.
+Start migration with `{"job":"migrate"}` only after `ARMED`. The controller sends the destination IP and the prepared source QEMU PID to the source host bridge. This identifies the VM for QMP operations even when the checkpoint runs on the destination. The controller records script status separately from the checkpoint. Prepare again after restoring the VM/device setup for another run.
 
 ## State interpretation
+
+`run.issuer_tgid` and `run.issuer_tid` are null at arm time. The first checkpoint `EVENT` reports the process and thread IDs captured at submission on the trigger host. The controller records these fields in the run and its export. In new runs the legacy `run.pid` field mirrors `issuer_tgid`. Older exports can contain a configured PID without a captured TID. The QEMU PID in `setup.hosts.source.pid` belongs to VM preparation.
 
 Checkpoint states: `STARTING → ARMED → PAUSED → HOST_ACTION → PAUSED → RESUMING → RELEASED → DONE`. Action/no-action/manual paths may omit states. Failure/cancellation yields `FAILED`, `CANCELLED`, or `INTERRUPTED` after server restart.
 

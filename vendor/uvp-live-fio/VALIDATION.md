@@ -62,10 +62,11 @@ ACTION_ACKNOWLEDGED message is not a migration or data-integrity PASS.
 1. Use isolated VMs and a disposable mounted guest test filesystem.
 2. Build and run make test on both relevant hosts. Verify BTF and exact symbols.
 3. Verify SSH/authentication and sudo -n. Prepare the source guest before migration.
-4. Set actual host PIDs, PF controller instance, target CNTLID, unique run ID and
-   source/destination SSH routes; copy prepared.status as necessary cross-host.
+4. Set the PF controller instance, target CNTLID, unique run ID and
+   source/destination SSH routes. Copy prepared.status as necessary cross-host.
 5. Arm case 1, confirm READY, then launch your known-working migration.
-6. Preserve EVENT, command counts/status, STOP_CONFIRMED, SIGCONT and guest logs.
+6. Record the issuer TGID/TID from EVENT, command counts/status, STOP_CONFIRMED,
+   SIGCONT and guest logs.
 7. Confirm the recorded actual guest start time. Do not call a post-resume launch
    a source fio execution inside the suspended interval.
 8. For continuity, use migrate-with-fio.sh and verify-continuity.sh, then inspect

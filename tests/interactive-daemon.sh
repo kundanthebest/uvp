@@ -44,7 +44,12 @@ finish() {
     else ((result != 0)) || fail 'daemon reported success'; fi
 }
 send_control() { printf '%s\n' "$1" >&3; }
-start 8 --host-action-program /usr/bin/touch --host-action-arg "$temp/host" -- /usr/bin/touch "$temp/guest"
+cat >"$temp/record-issuer" <<'ACTION'
+#!/bin/sh
+printf '%s %s\n' "$UVP_ISSUER_TGID" "$UVP_ISSUER_TID" > "$1"
+ACTION
+chmod +x "$temp/record-issuer"
+start 8 --host-action-program "$temp/record-issuer" --host-action-arg "$temp/host" -- "$temp/record-issuer" "$temp/guest"
 [[ ! -e $temp/host && ! -e $temp/guest ]] || fail 'action ran before request'
 send_control action
 until_line HOST_ACTION_DONE
@@ -54,6 +59,8 @@ until_line CONTROL_REJECTED
 send_control resume
 finish success
 [[ -f $temp/guest ]] || fail 'post-release action missing'
+identity=$(sed -nE 's/^EVENT .* tgid=([0-9]+) tid=([0-9]+) .*/\1 \2/p' "$log")
+[[ -n $identity && $(cat "$temp/host") == "$identity" && $(cat "$temp/guest") == "$identity" ]] || fail 'action received wrong issuer'
 awk '/^SIGCONT pid=/{released=1} /^ACTION_EXEC:/{if(!released) exit 1; ran=1} END {if(!ran) exit 1}' "$log" || fail 'wrong release order'
 
 start 8 --host-action-program /bin/false -- /bin/true
@@ -72,6 +79,8 @@ finish failure
 start 1 -- /bin/true
 finish failure
 grep -q 'hold deadline' "$log" || fail 'hold deadline missing'
-if "$bin" --pid "$$" --case 1 --controller /dev/nvme0 --cntlid 1 -- /bin/true >"$log" 2>&1; then fail 'test-only binary accepted real target'; fi
+if "$bin" --case 1 --controller /dev/nvme0 --cntlid 1 -- /bin/true >"$log" 2>&1; then fail 'test-only binary accepted real target'; fi
 grep -q 'test-only binary' "$log" || fail 'test restriction missing'
+if "$bin" --selftest --pid "$$" --case 1 -- /bin/true >"$log" 2>&1; then fail 'accepted a supplied target'; fi
+grep -q -- "--pid" "$log" || fail 'unexpected error for removed PID option'
 echo 'PASS: interactive daemon action ordering, EOF, cancellation, timeout and target restrictions'

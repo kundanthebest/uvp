@@ -12,6 +12,7 @@ int pidfd_exited(int fd);
  * Not ptrace; requires exclusive stop/resume ownership during the experiment.
  */
 int all_threads_stopped(pid_t pid);
+int check_issuer_access(void);
 int check_process(pid_t pid);
 uint64_t process_start_ticks(pid_t pid);
 #endif

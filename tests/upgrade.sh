@@ -20,7 +20,7 @@ if command -v sqlite3 >/dev/null; then
     sqlite3 -batch -bail "$db" <<'SQL'
 CREATE TABLE runs(id TEXT PRIMARY KEY, body TEXT);
 CREATE TABLE events(seq INTEGER PRIMARY KEY, run_id TEXT, time REAL, kind TEXT, message TEXT);
-INSERT INTO runs VALUES('abcdef012345','{"id":"abcdef012345","status":"PAUSED","migration_script_status":"RUNNING"}');
+INSERT INTO runs VALUES('abcdef012345','{"id":"abcdef012345","status":"PAUSED","pid":22001,"migration_script_status":"RUNNING"}');
 INSERT INTO events VALUES(8,'abcdef012345',1.0,'daemon','completed command');
 SQL
     before=$(sha256sum "$db")
@@ -38,7 +38,9 @@ if [[ -n ${db:-} ]]; then
         "$api" GET /api/state | tail -n +2 |
             jq -e '.run==null and .history[0].status=="INTERRUPTED" and .history[0].migration_script_status=="INTERRUPTED"' >/dev/null
         "$api" GET /api/runs/abcdef012345/export | tail -n +2 |
-            jq -e '.run.id=="abcdef012345" and .events==[{seq:8,time:1,kind:"daemon",message:"completed command"}]' >/dev/null
+            jq -e '.run.id=="abcdef012345" and .run.pid==22001 and
+                   .run.issuer_tgid==null and .run.issuer_tid==null and
+                   .events==[{seq:8,time:1,kind:"daemon",message:"completed command"}]' >/dev/null
         [[ $attempt != 1 ]] || "$api" init
     done
     [[ $before == "$(sha256sum "$db")" ]]

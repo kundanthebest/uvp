@@ -71,5 +71,24 @@ int main(void)
     assert(uvp_gate_reason(&g,0)==BAD_COMPLETION);
     g.completed=3; assert(uvp_gate_reason(&g,0)==OK);
     g.tracking_error=1; assert(uvp_gate_reason(&g,0)==BAD_TRACKING);
-    puts("PASS: migration decoder, custom selectors, syscall admission and gate decisions (not BPF execution)");
+
+    const __u64 owner = (123ULL << 32) | 126;
+    struct uvp_control ctl = {
+        .pid_tgid = owner, .start_ns = 8823, .cookie = 93, .epoch = 42
+    };
+    assert(uvp_same_submission(&ctl, owner, 8823, 93, 42));
+    assert(!uvp_same_submission(&ctl, owner + 1, 8823, 93, 42)); /* sibling */
+    assert(!uvp_same_submission(&ctl, (124ULL << 32) | 126, 8823, 93, 42));
+    assert(!uvp_same_submission(&ctl, owner, 9999, 93, 42)); /* TGID reuse */
+    assert(!uvp_same_submission(&ctl, owner, 8823, 94, 42)); /* next syscall */
+    assert(!uvp_same_submission(&ctl, owner, 8823, 93, 43)); /* next run */
+    g.start_ns = 8823; g.thread_start_ns = 8855;
+    assert(uvp_same_task_lifetime(&g, 8823, 8855));
+    assert(!uvp_same_task_lifetime(&g, 8823, 9128)); /* TID reused in group */
+    assert(!uvp_same_task_lifetime(&g, 9128, 9150)); /* new process */
+    assert(uvp_wrapper_syscall(0) && uvp_wrapper_syscall(16)); /* read/ioctl */
+    assert(uvp_wrapper_syscall(328)); /* pwritev2 */
+    assert(!uvp_wrapper_syscall(426)); /* io_uring_enter */
+    assert(!uvp_wrapper_syscall(-1));
+    puts("PASS: selectors, issuer identity, syscall admission and gate decisions (C logic)");
 }

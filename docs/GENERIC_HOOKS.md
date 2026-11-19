@@ -1,13 +1,19 @@
 # Command hooks: supported boundaries and validation
 
-The daemon selects one command checkpoint per run. It captures a command when
-`nvme_init_request()` runs in the selected process, links the request to the
-issuing thread and current syscall, observes `nvme_complete_rq`, and requests
-SIGSTOP at that same thread's syscall exit. The daemon confirms that every
-thread in the selected process is stopped before it accepts a host action.
+Arm one command checkpoint on the host where that command will run. The first
+matching submission in a supported synchronous operation owns the checkpoint.
 
-SIGSTOP applies to the whole process. SIGCONT releases that process; it is not
-an NVMe Resume command and does not establish the guest's QMP runstate.
+| Hook | How it uses the issuer |
+|---|---|
+| `nvme_init_request` | Reads `bpf_get_current_pid_tgid()` in the submitting thread. The upper 32 bits identify the process (TGID) and the lower 32 bits identify the thread (TID). Associates both with this request and syscall. |
+| `nvme_complete_rq` | Uses the request address to recover the saved issuer and mark the command complete. Completion may run on another CPU or in IRQ context. |
+| `raw_syscalls:sys_exit` | Requires the saved TGID **and** TID, the same enclosing syscall, successful completion of the tracked requests and, where configured, successful wrapper return. Then it requests SIGSTOP and reports the captured IDs. |
+
+SIGSTOP stops all threads of the submitting process. The daemon verifies the
+captured group leader through its pidfd and per-run BPF task-storage marker,
+then confirms the group stop before running a host action.
+SIGCONT releases the process. The VM migration driver controls the guest runstate
+and NVMe Resume operation independently.
 
 ## Migration commands
 
@@ -34,8 +40,7 @@ a pause between operations that have already both happened inside that syscall.
 
 ## Custom command selector
 
-Case 5 requires `--opcode` and `--queue admin|io`. The controller is still
-selected using `--controller /dev/nvmeN`, and the issuing process using `--pid`.
+Case 5 requires `--controller /dev/nvmeN`, `--opcode` and `--queue admin|io`.
 Queue identity distinguishes admin opcodes from overlapping I/O opcodes.
 
 | Option pair | Match rule | Default |
@@ -48,22 +53,22 @@ Decimal and `0x` hexadecimal values are accepted. Use `0xffffffff` for an exact
 32-bit match. `--cntlid` is not a custom-command filter; use the appropriate
 command-dword mask if the chosen command encodes a controller identifier there.
 
-Example: observe successful Identify Controller (CNS=1) in a known, persistent
-command-issuing process on `/dev/nvme0`:
+For example, arm Identify Controller (CNS=1) on `/dev/nvme0` in one terminal.
 
 ```bash
 sudo ./vendor/uvp-live-fio/bin/uvp-daemon \
-  --pid 12345 --case 5 --controller /dev/nvme0 \
+  --case 5 --controller /dev/nvme0 \
   --opcode 0x06 --queue admin --cdw10 1 --cdw10-mask 0xff \
   --bpf ./vendor/uvp-live-fio/bin/hooks.bpf.o \
   --control-stdin --hold-timeout 120 --timeout 300 -- /bin/true
 ```
 
-Replace the PID with the actual command issuer. The daemon does not follow
-children and must be armed before that process issues the selected command.
-For a short-lived nvme-cli process, arrange a supervised startup gate outside
-this example; do not guess or reuse a numeric PID. PID identity is additionally
-checked using the process start time and pidfd.
+After `READY`, run `sudo nvme id-ctrl /dev/nvme0` in a second terminal. UVP
+discovers that nvme-cli process even though it started after arming. In the
+daemon terminal inspect `tgid=` and `tid=` in `EVENT`, wait for `HOLD_READY`,
+then type `resume` to let nvme-cli finish. Any other process issuing the same
+matching command first on this host can claim the checkpoint. Run one matching
+workload at a time when you need to identify a particular issuer.
 
 Without `--phase-symbol`, custom mode admits only native x86-64 synchronous
 NVMe passthrough ioctls: `NVME_IOCTL_ADMIN_CMD`, `NVME_IOCTL_ADMIN64_CMD`,
@@ -74,8 +79,9 @@ ordinary buffered/direct filesystem I/O, background worker commands, and guest
 I/O on a VF assigned to VFIO are not supported by this default adapter.
 
 An optional `--phase-symbol NAME` enables an audited synchronous, int-returning
-kernel wrapper for a different path. It requires command submission and wrapper
-execution in the same selected issuing thread and syscall. The operator must
+kernel wrapper for a different path. The wrapper and submission must run in
+the same thread inside a supported native x86-64 read, write or ioctl syscall.
+The read/write family includes positional and vectored variants. The operator must
 verify that the wrapper covers the entire intended operation. This option does
 not make asynchronous paths supported.
 
@@ -86,14 +92,18 @@ wrapper error, syscall error, or NVMe error reject the checkpoint. The payload
 contains the first submission timestamp, last completion timestamp, counts, and
 last matching command fields. It does not provide a breakpoint between commands
 inside one syscall. A run is one-shot, including a rejected matching checkpoint.
+If the winning issuer exits or never reaches its matching syscall exit, the run
+cannot transfer ownership to a different submitter.
 
 ## Recovery limits
 
-Only the daemon owns the target's pidfd and stop/release sequence. On ordinary
-failure it disarms, kills the launched action process group, waits up to one
-second to reap the action, and releases its registered target. It warns if an
-uninterruptible action worker persists. An independent watchdog also releases an
-owned hold when the daemon dies or the bounded hold expires. That crash path
+The daemon controls the normal stop and release through a verified pidfd. On
+ordinary failure it disarms, kills the launched action process group, waits up
+to one second to reap the action, and releases its registered target. It warns
+if an uninterruptible action worker persists. If the daemon dies or the bounded
+hold expires, an independent watchdog withdraws the stop permit. If the exit
+hook has already consumed the permit, the watchdog can open and verify its own
+pidfd for the captured issuer to release an owned hold. That crash path
 cannot establish that every action descendant or hardware operation has stopped;
 the direct worker uses a parent-death SIGKILL, but hardware effects and kernel
 hangs cannot be rolled back. These runs are failures requiring host inspection.
@@ -101,9 +111,9 @@ hangs cannot be rolled back. These runs are failures requiring host inspection.
 ## Build and validation
 
 Build the daemon and BPF object from the same checkout. Their shared map/event
-ABI is version 2; do not combine this daemon with an earlier `hooks.bpf.o`.
-Use a native x86-64 Linux host with matching BTF, kprobes, raw tracepoints,
-ring buffers, pidfd support and permission to load BPF. The target kernel must
+ABI is version 3. Use a native x86-64 Linux host with matching BTF, kprobes,
+raw tracepoints, the `bpf_task_pt_regs` helper, ring buffers, pidfd support
+and permission to load BPF. The target kernel must
 expose the referenced NVMe types, fields, tracepoint and wrapper symbols.
 
 Validated in this project environment:

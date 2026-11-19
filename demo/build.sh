@@ -21,7 +21,7 @@ def fields($keys): with_entries(select(.key as $key | $keys | index($key)));
 def phase($id; $name; $host; $symbol): {$id,$name,$host,$symbol};
 {
     mode: "demo", require_prepare: true,
-    hosts: (.hosts | map_values(fields(["address","user","pid","controller","cntlid","ssh_port","ssh_target"]))),
+    hosts: (.hosts | map_values(fields(["address","user","controller","cntlid","ssh_port","ssh_target"]))),
     jobs: (.jobs | map_values(fields(["label","kind","host","enabled"]))),
     actions: (.actions | map_values(fields(["label","kind","host","enabled","description","argv","destructive","controller","nsid","confirmation"]))),
     phases: [

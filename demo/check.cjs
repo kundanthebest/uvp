@@ -11,9 +11,25 @@ function tick(delay){const end=time+delay;while(true){queue.sort((a,b)=>a.t-b.t)
 const request=ctx.createPreview(cfg,later,()=>time);
 function read(){return request('/api/state');}
 function prep(){request('/api/hosts',cfg.hosts);request('/api/prepare',{});tick(900);assert.equal(read().setup.status,'READY');}
-function run(extra){prep();const r=request('/api/runs',{case:1,target_host:'source',host_action:'source-nvme-reset',guest_action:'none',pid:12345,automatic:true,auto_resume:true,hold_seconds:10,checkpoint_seconds:300,...extra});tick(1000);assert.equal(read().run.status,'ARMED');request('/api/jobs',{job:'migrate'});return r;}
-const first=run({});tick(4500);assert.equal(read().run.status,'DONE');assert.equal(read().run.host_action_status,'DONE');assert.equal(request('/api/runs/'+first.id+'/export').events.filter(e=>e.kind==='action').length,2);
+function run(extra){prep();const r=request('/api/runs',{case:1,target_host:'source',host_action:'source-nvme-reset',guest_action:'none',automatic:true,auto_resume:true,hold_seconds:10,checkpoint_seconds:300,...extra});tick(1000);assert.equal(read().run.status,'ARMED');request('/api/jobs',{job:'migrate'});return r;}
+const first=run({});
+assert.equal(read().run.issuer_tgid,null);
+assert.equal(read().run.issuer_tid,null);
+assert.ok(!html.includes('id="pid"'));
+tick(4500);
+assert.equal(read().run.status,'DONE');
+assert.equal(read().run.host_action_status,'DONE');
+const exported=request('/api/runs/'+first.id+'/export');
+assert.equal(exported.events.filter(e=>e.kind==='action').length,2);
+assert.equal(exported.run.issuer_tgid,31001);
+assert.equal(exported.run.issuer_tid,31002);
 const second=run({automatic:false,auto_resume:false});tick(1300);assert.equal(read().run.status,'PAUSED');request('/api/runs/'+second.id+'/action',{});tick(1400);assert.equal(read().run.status,'PAUSED');request('/api/runs/'+second.id+'/resume',{});tick(1200);assert.equal(read().run.status,'DONE');
 const third=run({case:5,selectors:{opcode:6,queue:'admin',nsid:0,nsid_mask:0,cdw10:1,cdw10_mask:255,cdw11:0,cdw11_mask:0},automatic:false});tick(1300);request('/api/runs/'+third.id+'/cancel',{});tick(15000);assert.equal(read().run.status,'CANCELLED');
-prep();assert.throws(()=>request('/api/runs',{case:1,pid:12345,hold_seconds:10,checkpoint_seconds:300,host_action:'source-delete-ns'}),/namespace/);
+const destination=run({case:3,host_action:'none',automatic:false});
+tick(1300);
+assert.equal(read().run.issuer_tgid,32001);
+assert.equal(read().run.issuer_tid,32002);
+request('/api/runs/'+destination.id+'/cancel',{});
+prep();assert.throws(()=>request('/api/runs',{case:1,pid:31001}),/identifies the issuer/);
+prep();assert.throws(()=>request('/api/runs',{case:1,hold_seconds:10,checkpoint_seconds:300,host_action:'source-delete-ns'}),/namespace/);
 console.log('PASS single-file JavaScript syntax, offline transport, automatic action/release, manual action/release, custom command, cancellation, destructive-target acknowledgement, export');

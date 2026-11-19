@@ -170,7 +170,7 @@ case "$method $path" in
                 "$UVP_ROOT/build/uvp-ip" "$(jq -r '.config.hosts.destination.address' "$STATE")" >/dev/null || die 400 'Save the destination IP first'
             fi
             state_update --argjson job "$job" '.job=$job | .run += {migration_started:true,migration_script_status:"RUNNING"} |
-              if .config.require_prepare then .setup={status:"CONSUMED",detail:"Prepare hosts again before the next migration"} else . end'
+              if .config.require_prepare then .setup += {status:"CONSUMED",detail:"Prepare hosts again before the next migration"} else . end'
         else state_update --argjson job "$job" '.job=$job'; fi
         if ! launch_worker job "$id"; then
             state_update '.job.status="FAILED" | if .job.kind=="migration" then .run.migration_script_status="FAILED" else . end'

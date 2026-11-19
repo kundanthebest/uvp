@@ -49,10 +49,14 @@ function createPreview(config, timer = setTimeout, now = Date.now) {
     });
   }
   function hold(run) {
+    const tgid = run.host === 'source' ? 31001 : 32001;
+    run.issuer_tgid = tgid;
+    run.issuer_tid = tgid + 1;
     run.status = 'PAUSED';
     run.hold_deadline = now()/1000 + run.hold_seconds;
     run.detail = 'Simulated group stop confirmed on ' + run.host + '.';
-    log('eBPF', run.phase + ' completed. SIGSTOP at issuing syscall exit (simulation).', run);
+    log('eBPF', run.phase + ' completed. SIGSTOP at syscall exit of TGID ' +
+      run.issuer_tgid + ', TID ' + run.issuer_tid + ' (simulation).', run);
     log('daemon',run.detail,run);
     timer(() => {
       if (run !== current || !['PAUSED','HOST_ACTION'].includes(run.status)) return;
@@ -74,7 +78,7 @@ function createPreview(config, timer = setTimeout, now = Date.now) {
     check(phase, 'Select a supported command.');
     const host = body.case === 5 ? body.target_host : phase.host;
     check(config.hosts[host], 'Select a trigger host.');
-    integer(body.pid,2,2147483647,'issuer PID');
+    check(!Object.hasOwn(body,'pid'), 'The NVMe submission hook identifies the issuer.');
     const holdSeconds = integer(body.hold_seconds,5,600,'hold duration');
     integer(body.checkpoint_seconds,5,86400,'checkpoint wait');
     if (body.case === 5) {
@@ -91,7 +95,7 @@ function createPreview(config, timer = setTimeout, now = Date.now) {
     const run = {...clone(body), hold_seconds: holdSeconds, host, phase: phase.name, demo: true,
       id:'demo-'+(runs.length+1), created_at: now()/1000, status:'STARTING', detail:'Simulating hook attachment.',
       host_action_status:profile?'READY':'NONE', migration_started:false, migration_script_status:'NOT STARTED',
-      migration_result:'NOT VERIFIED', hosts:clone(config.hosts)};
+      migration_result:'NOT VERIFIED', issuer_tgid:null, issuer_tid:null, hosts:clone(config.hosts)};
     runs.unshift(run); current = run;
     log('daemon',run.detail,run);
     after(run,900,'STARTING',()=>{run.status='ARMED';run.detail='Simulated hooks armed. Start live migration.';log('daemon',run.detail,run);});
@@ -130,7 +134,10 @@ function createPreview(config, timer = setTimeout, now = Date.now) {
         check(/^\d{1,3}(\.\d{1,3}){3}$/.test(ip) && ip.split('.').every(part => Number(part) <= 255), 'Enter a valid example IPv4 address.');
         integer(body[host].ssh_port,1,65535,'SSH port');
       }
-      for (const host of ['source','destination']) config.hosts[host] = {...config.hosts[host], ...body[host],cntlid:Number(body[host].cntlid)};
+      for (const host of ['source','destination']) {
+        const {address,user,ssh_port,controller,cntlid}=body[host];
+        Object.assign(config.hosts[host], {address,user,ssh_port,controller,cntlid:Number(cntlid)});
+      }
       setup={status:'IDLE',detail:'Example host settings saved for this tab.'}; return clone(config);
     }
     if (path === '/api/preflight' || path === '/api/prepare') {
@@ -140,7 +147,6 @@ function createPreview(config, timer = setTimeout, now = Date.now) {
       log('setup',setup.detail);
       timer(()=>{setup.detail='Checking the simulated source.';log('setup',setup.detail);},400);
       timer(()=>{
-        config.hosts.source.pid=12345;config.hosts.destination.pid=23456;
         setup={status:preparing?'READY':'CHECKED',detail:preparing?'Both simulated hosts are ready.':'Simulated checks passed. Prepare hosts next.'};log('setup',setup.detail);
       },850); return clone(setup);
     }

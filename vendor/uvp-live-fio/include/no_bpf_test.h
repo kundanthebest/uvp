@@ -11,6 +11,7 @@
 struct bpf_object; struct bpf_program; struct bpf_link; struct ring_buffer;
 enum libbpf_print_level { LIBBPF_WARN, LIBBPF_INFO, LIBBPF_DEBUG };
 #define UNUSED __attribute__((unused))
+static inline int bpf_map_delete_elem(int f UNUSED,const void*k UNUSED){return -1;}
 static inline int bpf_map_update_elem(int f UNUSED,const void*k UNUSED,const void*v UNUSED,uint64_t x UNUSED){return -1;}
 static inline int bpf_map_lookup_elem(int f UNUSED,const void*k UNUSED,void*v UNUSED){return -1;}
 static inline void libbpf_set_print(int(*p)(enum libbpf_print_level,const char*,va_list) UNUSED){}

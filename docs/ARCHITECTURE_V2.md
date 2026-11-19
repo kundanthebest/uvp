@@ -10,7 +10,7 @@ flowchart TB
     API -->|"SSH"| Dst["Incoming destination QEMU"]
     Src -->|"RAM, VFIO state and storage"| Dst
     API -->|"Selected host"| Daemon["C daemon"]
-    Hooks["NVMe and syscall eBPF hooks"] -->|"Completion event"| Daemon
+    Hooks["NVMe and syscall eBPF hooks"] -->|"Syscall exit event"| Daemon
     Daemon --> Action["Configured host action"]
 ```
 
@@ -31,11 +31,13 @@ flowchart TB
 
 The destination must first reach `inmigrate` with its incoming service and exports ready. The source must be `running`. The host bridge verifies the PID file and executable, checks the Unix QMP socket's peer PID, and queries QMP. The operator chooses one command and action per run. Source Suspend/Get checkpoints load the daemon on the source, and destination Set/Resume checkpoints load it on the destination.
 
-After the daemon reports `READY`, the controller records `ARMED` and accepts the migration job. It starts on the source with the supplied destination address. The selected migration command must issue inside its audited complete-operation wrapper. The eBPF program records the issuing TGID/TID and request identity and observes command completion. At the original thread's syscall exit it can request SIGSTOP and emit a ring event. Get/Set can span multiple fragments. A later migration transition in the same syscall invalidates an earlier boundary. [Command details](GENERIC_HOOKS.md)
+After the daemon reports `READY`, the controller records `ARMED` and accepts the migration job. It starts on the source with the supplied destination address and the source QEMU identity verified during preparation.
+
+On the selected trigger host, the first matching `nvme_init_request` in the configured synchronous operation captures the issuer’s TGID, TID and process start time. The completion hook uses the request address to find that recorded owner, including when an IRQ or workqueue handles completion. The exit hook compares the current thread with the stored owner and checks the syscall and completion status before requesting SIGSTOP and emitting a ring event. Another thread sharing the TGID cannot trigger the stop on its own syscall exit. Get/Set can span multiple fragments. A later migration transition in the same syscall invalidates an earlier boundary. [Command details](GENERIC_HOOKS.md)
 
 ## Action and release
 
-The daemon checks that the registered process's threads have reached a stopped state. At `HOLD_READY`, the worker can send the literal `action` command over the persistent daemon control channel. The program and arguments were chosen from the trusted profile when arming. Successful completion returns to held state. An operator or the automatic worker can then send `resume`, and the daemon sends SIGCONT and handles any post-release guest job.
+Each Linux host permits one armed hardware daemon at a time. A process can submit commands on several controllers, and a stop affects all its threads. The daemon uses the captured TGID to open a pidfd and verifies a per-run marker attached by eBPF to the original process. It confirms that the issuer’s threads have stopped before reporting `HOLD_READY`. The worker can then send `action` over the persistent control channel to run the program selected at arming. Successful completion returns to held state. An operator or the automatic worker can send `resume`, and the daemon sends SIGCONT and handles any post-release guest job.
 
 Action failure, timeout or control-channel loss can trigger cleanup of the owned stop. A watchdog can release the process if the daemon dies. Hardware may already have accepted a reset or deletion, and kernel/hardware hangs can outlast the control process. An initial checkpoint cycle ending `DONE`, a zero migration-script exit and independently verified guest integrity are three distinct outcomes.
 

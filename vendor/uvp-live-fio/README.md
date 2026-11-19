@@ -71,7 +71,7 @@ include/uvp.h                Event/map ABI, command decoder, gate decision
 src/hooks.bpf.c              Request, completion, phase and syscall hooks
 src/daemon.c                 Load/attach, stop, queue action, SIGCONT, deadlines
 src/process.c               pidfd/process identity and stopped-task checks
-config/uvp.conf.example      PIDs, controller/CNTLID, symbols, SSH and fio settings
+config/uvp.conf.example      Controller/CNTLID, symbols, SSH and fio settings
 scripts/start-fio.sh         DEFAULT ACTION: edit here for next userspace action
 scripts/run-case.sh          Case number -> source/destination configuration
 scripts/prepare-guest.sh     Stage the guest launcher before migration
@@ -86,17 +86,16 @@ VALIDATION.md               What was tested, and what was not
 
 The requested three semantic hooks remain:
 
-1. `nvme_init_request`: filter command/controller/CNTLID; record request and
-   TGID/TID before a possible context handoff.
+1. `nvme_init_request` filters the command, controller and CNTLID. The first
+   matching submission records its current TGID and TID with the request.
 2. `nvme_complete_rq` **raw tracepoint**: correlate the exact request and record
    status/cancellation. Never identify the owner from completion-context PID.
 3. `raw_syscalls:sys_exit`: original issuing TID, successful operation and syscall,
    one-shot ring event, `bpf_send_signal_thread(SIGSTOP)`.
 
-Three supporting attachments are used: `sys_enter` to prevent stale syscall
-association, and a kprobe/kretprobe pair on the selected logical wrapper.
-The VFIO adapter does not incorrectly restrict syscalls to native NVMe admin
-ioctls: VFIO state transitions and migration-data file operations are permitted.
+The VFIO adapter checks the submitting thread’s syscall and uses a
+kprobe/kretprobe pair on the selected complete-operation wrapper. It supports
+VFIO state-transition ioctls and synchronous migration-data reads and writes.
 
 ## Build on the host
 
@@ -141,15 +140,16 @@ sudo ./scripts/preflight.sh nvmevf_cmd_set_ctrl_state
 sudo ./scripts/preflight.sh nvmevf_cmd_resume_device
 ```
 
-## Configure once, update identities for every fresh migration
+## Configure the hosts and guest workload
 
 ```bash
 cp config/uvp.conf.example uvp.conf
 vim uvp.conf
 ```
 
-Set a new `RUN_ID`, the actual source/destination QEMU **host TGIDs**, PF controller
-names, target VF CNTLIDs, SSH endpoints/key/known_hosts, and the guest test mount.
+Set a new `RUN_ID`, PF controller names, target VF CNTLIDs, SSH
+endpoints/key/known_hosts, and the guest test mount. The submission hook
+discovers the issuing PID and TID on the trigger host.
 For example, source/destination guest SSH port forwards may be 2222 and 2223 on
 one host; they are examples, not discovered configuration.
 
@@ -171,7 +171,7 @@ and ensure free space. Old data files are not automatically deleted.
 
 ### A1. Start your existing source and destination setup
 
-Use your existing `source.sh` and `DEST.sh`. Set their actual PIDs in config.
+Use your existing `source.sh` and `DEST.sh` to start the two VMs.
 Destination should be listening for this migration. The source guest must still
 be running for preparation. Do not begin migration until the daemon prints READY.
 
@@ -201,8 +201,7 @@ After `READY`, use another terminal to execute your existing migration script:
 ```
 
 For subsequent independent migrations, use fresh VM/device state as your normal
-migration workflow requires, a new RUN_ID, and updated QEMU PIDs. The case commands
-are:
+migration workflow requires and a new RUN_ID. Choose the command for the case.
 
 ```bash
 sudo ./scripts/run-case.sh 2 ./uvp.conf  # source: complete Get
@@ -305,8 +304,8 @@ Cases 3/4: run daemon on the destination host; preparation still targets the
 running source guest. Preparation can be executed on either host if its config
 routes source SSH correctly.
 
-Use the SAME run ID/settings on both hosts. Config PIDs/controller instances are
-host-local. Copy `prepared.status` into `$OUTPUT_DIR/$RUN_ID/` on the daemon host
+Use the SAME run ID/settings on both hosts. Controller instances and captured
+issuer IDs are host-local. Copy `prepared.status` into `$OUTPUT_DIR/$RUN_ID/` on the daemon host
 before arming; it supplies the expected guest boot ID checked before launch.
 Copy `pre-migration.status` to the machine running continuity checks,
 or use a shared OUTPUT_DIR, without overwriting any live guest backing storage.
@@ -317,27 +316,26 @@ source/destination-host RPC protocol.
 
 ```bash
 sudo ./bin/uvp-daemon \
-    --pid 12345 --case 1 --controller /dev/nvme0 --cntlid 1 \
+    --case 1 --controller /dev/nvme0 --cntlid 1 \
     --bpf ./bin/hooks.bpf.o \
     --phase-symbol nvmevf_cmd_suspend_device \
     --timeout 300 --action-timeout 300 --hold-ms 200 \
     -- ./scripts/start-fio.sh ./uvp.conf
 ```
 
-Everything after `--` is an argv array passed to `execvp`, not an event-derived
-shell command. The worker receives `UVP_TESTCASE`, `UVP_QEMU_TGID`, `UVP_EPOCH`.
+Everything after `--` is an argv array passed to `execvp`. The worker receives
+`UVP_TESTCASE`, `UVP_ISSUER_TGID`, `UVP_ISSUER_TID` and `UVP_EPOCH`.
 
 For the next change, usually edit only `scripts/start-fio.sh`. Edit
 `guest/guest-fio.sh` for the workload, `symbols[]`/config for wrapper names,
 `uvp_command_case()` for command decoding, and `on_exit()` for gate logic.
 
-**All actions in this version execute after SIGCONT.** A future destructive HOST
-action that must finish before releasing QEMU requires a distinct action mode and
-validation policy. Do not use this fio-specific sequencing for that purpose.
+The fio command after `--` executes after SIGCONT. The UI can separately
+configure a host action to run while the discovered issuer is stopped.
 
 ## Failure behavior and limits
 
-* Attach mode uses a pidfd plus PID-generation checks. It samples all QEMU TIDs
+* Attach mode uses a pidfd plus PID-generation checks. It samples all issuer TIDs
   as stopped in repeated consistent `/proc` snapshots; this is not a parent
   waitpid acknowledgement and not an atomic ptrace barrier. Run without another
   debugger, process freezer or independent SIGCONT owner. Arbitrary thread
@@ -346,8 +344,10 @@ validation policy. Do not use this fio-specific sequencing for that purpose.
   driver work in that syscall has already happened. Signal delivery may defer.
 * Coalesced later transitions observed in the same syscall are rejected.
   Cross-thread/global protocol serialization is not implemented.
-* Works for synchronous wrappers executed in the configured QEMU thread. A
-  workqueue-owned or asynchronous command requires another ownership adapter.
+* Command submission and the selected synchronous wrapper must execute in the
+  same user thread and syscall. Deferred completion can execute on another CPU.
+  A worker that performs the original submission on behalf of a user process
+  requires another adapter to identify the issuing user thread.
 * All tracked commands must succeed; a transient command error invalidates the
   checkpoint even if the driver later retries successfully.
 * Reserve event before SIGSTOP; signal/map/ring failures invalidate the test.
@@ -372,8 +372,8 @@ No READY: inspect libbpf messages. Check the actual kernel/module BTF and exact
 wrapper symbol, including compiler suffixes. Existing filename/module naming is
 not enough to guarantee a probeable symbol. `--debug` enables libbpf diagnostics.
 
-READY but timeout: verify process PID generation, host controller instance,
-CNTLID, case/host, and whether your driver executes the selected wrapper in QEMU
+READY but timeout: verify host controller instance, CNTLID, case/host,
+and whether your driver executes the selected wrapper in the submitting thread’s
 context. `STAT wrappers=0` suggests wrong symbol/path; submits=0 suggests the
 command/device filter or request-init adapter did not match. Stats print on exit.
 

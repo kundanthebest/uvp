@@ -5,10 +5,12 @@
 #include <dirent.h>
 #include <errno.h>
 #include <poll.h>
+#include <linux/capability.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/syscall.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -31,6 +33,33 @@ int pidfd_exited(int fd)
     struct pollfd p = {.fd = fd, .events = POLLIN};
     int r = poll(&p, 1, 0);
     return r > 0 && p.revents;
+}
+/* bpf_get_current_pid_tgid returns IDs in the initial PID namespace. An arm
+ * can select a process with a different UID anywhere on this host. Verify
+ * recovery prerequisites before allowing the kernel hook to stop anyone. */
+int check_issuer_access(void)
+{
+    struct stat st;
+    /* Linux UAPI init_ns_ino (linux/nsfs.h). Older headers omit the enum. */
+    const ino_t initial_pid_ns=0xEFFFFFFCU, initial_user_ns=0xEFFFFFFDU;
+    struct __user_cap_header_struct hdr={.version=_LINUX_CAPABILITY_VERSION_3};
+    struct __user_cap_data_struct caps[_LINUX_CAPABILITY_U32S_3]={};
+    if (stat("/proc/self/ns/pid",&st) || st.st_ino!=initial_pid_ns ||
+        stat("/proc/self/ns/user",&st) || st.st_ino!=initial_user_ns) {
+        fprintf(stderr,"Run the daemon in the Linux host PID and user namespaces\n");
+        return -1;
+    }
+    if (syscall(SYS_capget,&hdr,caps) ||
+        !(caps[CAP_TO_INDEX(CAP_KILL)].effective & CAP_TO_MASK(CAP_KILL))) {
+        fprintf(stderr,"The hardware daemon needs effective CAP_KILL to release the issuer\n");
+        return -1;
+    }
+    int fd=open_pidfd(getpid());
+    if (fd<0) { perror("pidfd_open"); return -1; }
+    int rc=signal_pidfd(fd,0);
+    if (rc) perror("pidfd_send_signal");
+    close(fd);
+    return rc;
 }
 int check_process(pid_t pid)
 {

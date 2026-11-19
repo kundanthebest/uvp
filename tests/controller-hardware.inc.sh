@@ -30,31 +30,42 @@ cat >"$temp/bin/daemon" <<'DAEMON'
 set -euo pipefail
 work=$(dirname "$0")
 if [[ -f $work/use-real-daemon ]]; then
-    # Replace only the PID flag with the synthetic-process option. Keep the
-    # controller-built action/profile arguments intact for the native daemon.
     binary=$(cat "$work/binary")
-    args=()
-    while (($#)); do
-        case $1 in
-            --pid) shift 2;;
-            --) args+=("$@"); break;;
-            *) args+=("$1"); shift;;
-        esac
-    done
-    exec "$binary" --selftest "${args[@]}"
+    exec "$binary" --selftest "$@"
 fi
 printf '%s\n' "$@" > "$work/daemon-argv"
-printf 'READY pid=22001 case=1 phase=suspend\n'
+case_id=
+while (($#)); do
+    case $1 in
+        --pid) echo 'Issuer was supplied at arm time' >&2; exit 2;;
+        --case) case_id=$2; shift 2;;
+        --) break;;
+        *) shift;;
+    esac
+done
+case $case_id in
+    1) tgid=33001; tid=34001;;
+    3) tgid=33003; tid=34003;;
+    *) exit 2;;
+esac
+# stderr is kept for diagnostics. Only the daemon's stdout EVENT is authoritative.
+printf 'EVENT case=%s phase=fixture tgid=99001 tid=99002 ctrl=nvme0\n' "$case_id" >&2
+printf 'READY case=%s phase=fixture issuer=auto\n' "$case_id"
 for _ in {1..300}; do
     [[ -e $work/migrated ]] && break
     sleep .05
 done
 [[ -e $work/migrated ]] || exit 1
-printf 'EVENT case=1\nSTOP_CONFIRMED pid=22001\nHOLD_READY timeout_s=20\n'
+if [[ -e $work/hold-without-event ]]; then
+    printf 'HOLD_READY timeout_s=20\n'
+    exit 0
+fi
+printf 'EVENT case=%s phase=fixture tgid=%s tid=%s ctrl=nvme0\n' "$case_id" "$tgid" "$tid"
+printf 'STOP_CONFIRMED pid=%s\nHOLD_READY timeout_s=20\n' "$tgid"
 while read -r line; do
     case $line in
         action) printf 'HOST_ACTION_STARTED\nHOST_ACTION_DONE\n';;
-        resume) printf 'SIGCONT pid=22001\nACTION_ACKNOWLEDGED: fixture\n'; exit 0;;
+        resume) printf 'SIGCONT pid=%s\nACTION_ACKNOWLEDGED: fixture\n' "$tgid"; exit 0;;
         cancel) exit 1;;
         *) exit 2;;
     esac
@@ -85,15 +96,38 @@ rm "$temp/bin/drift"
 : >"$temp/bin/operations"
 prepare
 [[ $(cat "$temp/bin/operations") == $'destination prepare\nsource prepare' ]] || die 'hosts prepared out of order'
-request GET /api/config 200
-assert_json '.hosts.source.pid == 22001 and .hosts.destination.pid == 22002'
+request GET /api/state 200
+assert_json '.setup.hosts.source.pid == 22001 and .setup.hosts.destination.pid == 22002'
 arm '{"case":1,"automatic":true,"auto_resume":true,"host_action":"source-custom","hold_seconds":20,"checkpoint_seconds":30}'
+assert_json '.run.issuer_tgid == null and .run.issuer_tid == null'
 migrate
 await_state '.run.status == "DONE" and .job.status == "DONE"'
 assert_json '.run.migration_script_status == "DONE" and .run.host_action_status == "DONE"'
+assert_json '.run.issuer_tgid == 33001 and .run.issuer_tid == 34001'
 grep -qx -- '--host-action-program' "$temp/bin/daemon-argv" || die 'missing daemon host action'
 grep -Fqx 'HOLD_READY timeout_s=9999' "$temp/bin/daemon-argv" || die 'host action argv split'
 echo 'PASS: host failure and drift, destination-first setup, migration PID/IP contract and argv boundaries'
+
+rm "$temp/bin/migrated"
+prepare
+arm '{"case":3,"automatic":true,"auto_resume":true,"hold_seconds":20,"checkpoint_seconds":30}'
+assert_json '.run.host == "destination" and .run.issuer_tgid == null and .run.issuer_tid == null'
+migrate
+await_state '.run.status == "DONE" and .job.status == "DONE"'
+request GET "/api/runs/$rid/export" 200
+assert_json '.run.issuer_tgid == 33003 and .run.issuer_tid == 34003 and
+             any(.events[]; .kind == "daemon-stderr" and (.message | contains("tgid=99001")))'
+echo 'PASS: destination issuer discovered from daemon stdout while the source QMP peer launches migration'
+
+rm "$temp/bin/migrated"
+touch "$temp/bin/hold-without-event"
+prepare
+arm '{"case":1,"automatic":true,"auto_resume":true,"host_action":"source-custom"}'
+migrate
+await_state '.run.status == "FAILED" and .job.status == "DONE"'
+assert_json '.run.issuer_tgid == null and .run.issuer_tid == null and (.run.auto_action_requested|not)'
+rm "$temp/bin/hold-without-event"
+echo 'PASS: a hold without a submission event cannot trigger automatic action'
 
 prepare
 touch "$temp/bin/use-real-daemon"
