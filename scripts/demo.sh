@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-only
 set -euo pipefail
-cd "$(dirname "$0")/.."
-exec python3 -m uvp_server.server "$@"
+root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
+make -C "$root" controller
+exec "$root/scripts/start-controller.sh" --config "$root/config/demo.json" "$@"

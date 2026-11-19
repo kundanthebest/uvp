@@ -71,3 +71,9 @@ Typical HTTP errors: 400 invalid selector/profile, 401 bad token, 403 origin/Hos
 The controller owns a local/SSH stdin stream to the C daemon. The daemon reports machine-control stdout such as `READY`, `HOLD_READY`, `HOST_ACTION_STARTED`, `HOST_ACTION_DONE` and `SIGCONT`. Action output is redirected to stderr so it cannot masquerade as these events.
 
 After `HOLD_READY`, stdin accepts `action`, `resume`, or `cancel`, one per line. The daemon owns its pidfd and verifies the group stop. EOF, action failure and bounded timeout invoke cleanup; the watchdog provides emergency release if the daemon dies. Cleanup release is not test success or rollback.
+
+## Server-rendered forms
+
+The hardware controller serves the form dashboard at `/forms`. Authenticate in the browser with username `uvp` and the controller token as the password. The form POSTs URL-encoded fields to the same HTTP origin. It uses the same validation, action profiles, and run state as the JSON API. Successful changes redirect to the dashboard, so refreshing the status page does not repeat an action. Run exports are available through `POST /forms/export`.
+
+For JSON clients, `POST /api/jobs` accepts an optional `run_id` alongside the configured migration job. An old ID returns HTTP 409. This binds the Start action to the run the operator reviewed.

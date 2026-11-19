@@ -16,7 +16,7 @@
         "-n",
         "--"
       ],
-      "bridge": "/opt/uvp-orchestrator/scripts/host-bridge.py",
+      "bridge": "/opt/uvp-orchestrator/scripts/host-bridge.sh",
       "daemon": "/opt/uvp-orchestrator/vendor/uvp-live-fio/bin/uvp-daemon",
       "bpf": "/opt/uvp-orchestrator/vendor/uvp-live-fio/bin/hooks.bpf.o",
       "pid": 0,
@@ -36,7 +36,7 @@
         "-n",
         "--"
       ],
-      "bridge": "/opt/uvp-orchestrator/scripts/host-bridge.py",
+      "bridge": "/opt/uvp-orchestrator/scripts/host-bridge.sh",
       "daemon": "/opt/uvp-orchestrator/vendor/uvp-live-fio/bin/uvp-daemon",
       "bpf": "/opt/uvp-orchestrator/vendor/uvp-live-fio/bin/hooks.bpf.o",
       "pid": 0,
@@ -54,8 +54,7 @@
       "destructive": false,
       "controller": "/dev/nvme0",
       "argv": [
-        "/usr/bin/python3",
-        "/opt/uvp-orchestrator/scripts/host-action.py",
+        "/opt/uvp-orchestrator/scripts/host-action.sh",
         "nvme-reset",
         "/dev/nvme0"
       ]
@@ -69,8 +68,7 @@
       "destructive": true,
       "controller": "/dev/nvme0",
       "argv": [
-        "/usr/bin/python3",
-        "/opt/uvp-orchestrator/scripts/host-action.py",
+        "/opt/uvp-orchestrator/scripts/host-action.sh",
         "namespace-delete",
         "/dev/nvme0",
         "--nsid",
@@ -87,8 +85,7 @@
       "destructive": false,
       "controller": "/dev/nvme0",
       "argv": [
-        "/usr/bin/python3",
-        "/opt/uvp-orchestrator/scripts/host-action.py",
+        "/opt/uvp-orchestrator/scripts/host-action.sh",
         "vf-flr",
         "0000:83:00.1"
       ]
@@ -112,8 +109,7 @@
       "destructive": false,
       "controller": "/dev/nvme0",
       "argv": [
-        "/usr/bin/python3",
-        "/opt/uvp-orchestrator/scripts/host-action.py",
+        "/opt/uvp-orchestrator/scripts/host-action.sh",
         "nvme-reset",
         "/dev/nvme0"
       ]
@@ -127,8 +123,7 @@
       "destructive": true,
       "controller": "/dev/nvme0",
       "argv": [
-        "/usr/bin/python3",
-        "/opt/uvp-orchestrator/scripts/host-action.py",
+        "/opt/uvp-orchestrator/scripts/host-action.sh",
         "namespace-delete",
         "/dev/nvme0",
         "--nsid",
@@ -145,8 +140,7 @@
       "destructive": false,
       "controller": "/dev/nvme0",
       "argv": [
-        "/usr/bin/python3",
-        "/opt/uvp-orchestrator/scripts/host-action.py",
+        "/opt/uvp-orchestrator/scripts/host-action.sh",
         "vf-flr",
         "0000:83:00.1"
       ]
@@ -171,8 +165,7 @@
       "bridge_verb": "prepare",
       "use_privilege": true,
       "argv": [
-        "/usr/bin/python3",
-        "/opt/uvp-orchestrator/scripts/host-bridge.py",
+        "/opt/uvp-orchestrator/scripts/host-bridge.sh",
         "prepare"
       ],
       "timeout": 120
@@ -185,8 +178,7 @@
       "bridge_verb": "prepare",
       "use_privilege": true,
       "argv": [
-        "/usr/bin/python3",
-        "/opt/uvp-orchestrator/scripts/host-bridge.py",
+        "/opt/uvp-orchestrator/scripts/host-bridge.sh",
         "prepare"
       ],
       "timeout": 120
@@ -199,8 +191,7 @@
       "bridge_verb": "migrate",
       "use_privilege": true,
       "argv": [
-        "/usr/bin/python3",
-        "/opt/uvp-orchestrator/scripts/host-bridge.py",
+        "/opt/uvp-orchestrator/scripts/host-bridge.sh",
         "migrate"
       ],
       "timeout": 1800

@@ -8,10 +8,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install build dependencies
-        run: sudo apt-get update && sudo apt-get install -y clang llvm libbpf-dev libelf-dev zlib1g-dev build-essential pkg-config
-      - name: Build production daemon and BPF
+        run: sudo apt-get update && sudo apt-get install -y clang llvm libbpf-dev libelf-dev zlib1g-dev build-essential pkg-config jq curl util-linux sqlite3
+      - name: Build C controller, host tools, daemon and eBPF
         run: make build CLANG=/usr/bin/clang
-      - name: Test API, matching logic and userspace stop/action/release
+      - name: Test shell and C controller, host bridge and daemon
         run: make test
-      - name: Check JavaScript
-        run: node --check web/app.js
+      - name: Verify release and offline UI
+        shell: bash
+        run: |
+          sha256sum --check --quiet SHA256SUMS
+          test -z "$(git ls-files '*.py' '*.pyw' '*.pyc')"
+          node --check web/app.js
+          bash demo/build.sh
+          git diff --exit-code -- demo/uvp-demo.html
+          node demo/check.cjs

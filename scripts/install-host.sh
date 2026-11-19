@@ -1,57 +1,58 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0-only
 set -euo pipefail
-ROLE=''
-INSTALL_DEPS=false
+role=''
+dependencies=false
 while (($#)); do
-    case "$1" in
-        --role) [[ $# -ge 2 ]] || { echo '--role needs source or destination' >&2; exit 2; }; ROLE=$2; shift 2 ;;
-        --install-deps) INSTALL_DEPS=true; shift ;;
-        *) echo 'Usage: sudo ./scripts/install-host.sh --role source|destination [--install-deps]' >&2; exit 2 ;;
+    case $1 in
+        --role) role=${2:?Expected source or destination}; shift 2 ;;
+        --install-deps) dependencies=true; shift ;;
+        *) echo 'Usage: sudo scripts/install-host.sh --role source|destination [--install-deps]' >&2; exit 2 ;;
     esac
 done
-[[ $ROLE == source || $ROLE == destination ]] || { echo '--role source|destination is required' >&2; exit 2; }
-[[ $EUID == 0 ]] || { echo 'Run this installer with sudo on the intended lab Linux host' >&2; exit 1; }
-[[ $(uname -m) == x86_64 ]] || { echo 'The current BPF implementation supports x86-64 hosts' >&2; exit 1; }
-PROJECT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-TARGET=/opt/uvp-orchestrator
-if $INSTALL_DEPS; then
-    command -v apt-get >/dev/null || { echo '--install-deps supports Debian/Ubuntu; install dependencies manually on other distributions' >&2; exit 1; }
+[[ $role == source || $role == destination ]] || { echo 'Select --role source or --role destination' >&2; exit 2; }
+((EUID == 0)) || { echo 'Run with sudo on the intended Linux host' >&2; exit 1; }
+[[ $(uname -m) == x86_64 ]] || { echo 'Hardware mode requires x86-64 Linux' >&2; exit 1; }
+if "$dependencies"; then
+    command -v apt-get >/dev/null || { echo 'Install the dependencies in docs/DEPLOYMENT.md for this distribution' >&2; exit 1; }
     apt-get update
-    apt-get install -y build-essential clang llvm pkg-config libbpf-dev libelf-dev zlib1g-dev python3 openssh-client nvme-cli jq socat
+    apt-get install -y build-essential clang llvm pkg-config libbpf-dev libelf-dev zlib1g-dev openssh-client nvme-cli jq socat util-linux coreutils
 fi
-[[ ! -L $TARGET ]] || { echo 'Install target must not be a symlink' >&2; exit 1; }
-install -d -o root -g root -m 0755 "$TARGET" /etc/uvp
+src=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
+dst=/opt/uvp-orchestrator
+[[ ! -L $dst ]] || { echo "Refusing symlink at $dst" >&2; exit 1; }
+install -d -o root -g root -m 0755 "$dst" /etc/uvp
 install -d -o root -g root -m 0750 /var/log/uvp /run/uvp-hmlm
-/usr/bin/python3 - "$PROJECT_DIR" "$TARGET" <<'PY'
-import os, shutil, sys
-from pathlib import Path
-source, target = map(Path, sys.argv[1:])
-excluded = {'.git', 'var', 'build', '__pycache__', 'hardware.json', 'uvp.conf', 'host.json', 'ui-hosts.json'}
-for path in source.rglob('*'):
-    relative = path.relative_to(source)
-    if any(part in excluded for part in relative.parts) or path.suffix in ('.pyc', '.sqlite3', '.pem', '.key'):
-        continue
-    if path.is_symlink():
-        raise SystemExit('Unexpected symlink in project package: ' + str(relative))
-    dest = target / relative
-    if dest.is_symlink():
-        raise SystemExit('Unexpected symlink in installation: ' + str(dest))
-    if path.is_dir():
-        dest.mkdir(exist_ok=True)
-        dest.chmod(0o755)
-    else:
-        if source != target:
-            shutil.copyfile(path, dest)
-        dest.chmod(0o755 if path.suffix in ('.sh', '.py') or path.name == 'uvp-daemon' else 0o644)
-    os.chown(dest, 0, 0)
-PY
-make -C "$TARGET" build CLANG=/usr/bin/clang
+# Only install files in the distributed manifest. Local keys, configuration
+# and build products in the checkout never enter the privileged installation.
+cd "$src"
+sha256sum --check --quiet SHA256SUMS
+install_entry() {
+    local rel=$1 mode=0644 parent component current
+    [[ $rel =~ ^[.a-zA-Z0-9_/-]+$ && $rel != /* && /$rel/ != */../* ]] || return 1
+    [[ -f $src/$rel && ! -L $src/$rel ]] || return 1
+    current=$dst
+    IFS=/ read -ra parents <<< "${rel%/*}"
+    if [[ $rel == */* ]]; then
+        for component in "${parents[@]}"; do
+            current=$current/$component
+            [[ ! -L $current ]] || return 1
+            install -d -o root -g root -m 0755 "$current"
+        done
+    fi
+    [[ ! -L $dst/$rel ]] || return 1
+    [[ $rel != *.sh ]] || mode=0755
+    if [[ $src != "$dst" ]]; then
+        install -o root -g root -m "$mode" -- "$src/$rel" "$dst/$rel"
+    else
+        chown root:root -- "$dst/$rel"
+        chmod "$mode" -- "$dst/$rel"
+    fi
+}
+while read -r hash rel; do install_entry "$rel"; done < SHA256SUMS
+install_entry SHA256SUMS
+make -C "$dst" build CLANG=/usr/bin/clang
 if [[ ! -e /etc/uvp/host.json ]]; then
-    install -m 0600 "$TARGET/config/host-${ROLE}.example.json" /etc/uvp/host.json
-    echo 'Created /etc/uvp/host.json from the example; configure the real launcher, QEMU path, QMP socket and pidfile before use.'
-else
-    echo 'Preserved existing /etc/uvp/host.json; confirm its role and paths manually.'
+    install -o root -g root -m 0600 "$dst/config/host-${role}.example.json" /etc/uvp/host.json
 fi
-echo "Installed UVP host tools in $TARGET. No VM, eBPF program, reset or migration was started."
-echo 'Next: edit /etc/uvp/host.json, then run sudo /opt/uvp-orchestrator/scripts/host-preflight.py </dev/null'
+echo "Installed host tools at $dst. Configure /etc/uvp/host.json, then run sudo $dst/scripts/host-preflight.sh."

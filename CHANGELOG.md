@@ -1,11 +1,14 @@
-# Changes — 2026-11-19
+# Changes
 
-- Added two-host UI connection settings, preflight and destination-before-source preparation with verified QMP/PID identity.
-- Added automatic action execution and optional automatic process release after successful selected NVMe command completion.
-- Added generic synchronous NVMe opcode, queue, NSID and CDW10/CDW11 selectors while retaining the existing migration wrappers.
-- Added a fixed host bridge, source/destination/migration wrappers, installer, Windows tunnel helper, GitHub publishing helper and deployment guide.
-- Included the existing repeat-safe v3 migration script unchanged.
-- Added namespace deletion profiles with an explicit configured NSID and target acknowledgement.
-- Added failure/state-machine tests, native compilation checks and GitHub CI configuration.
+## Native controller and shell orchestration
 
-Hardware QEMU/kernel patches and machine-specific source/destination launchers remain prerequisites. See VALIDATION.md for exact test scope.
+- Replaced the Linux HTTP service with a loopback C server. The server-rendered HTML forms work in a Windows browser with JavaScript disabled.
+- Moved host preparation, checkpoint sequencing, event recording, SSH transport and action dispatch to Bash and native helpers.
+- Moved host preflight and the privileged bridge to shell with native QMP peer identification. The release continues to use the supplied repeat-safe v3 migration script and C/libbpf/eBPF implementation.
+- Added controller and host tests in shell/C and a Bash builder for the optional offline dashboard.
+
+## Two-host command and action workflow
+
+- Added destination-first preparation with verified QMP/PID identity and command-triggered automatic or manual action/release.
+- Added custom synchronous opcode, queue, NSID, CDW10 and CDW11 selectors alongside the four migration wrappers.
+- Added host installation, Windows SSH tunnel support, and explicit profile/target confirmation for disposable namespace deletion.

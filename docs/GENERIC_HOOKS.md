@@ -115,7 +115,7 @@ Validated in this project environment:
 - Test-only and production daemon synthetic runs exercise stop/release, all five
   cases, invalid selectors, action failure/deadline, interruption and watchdog
   recovery. These runs create disposable child processes and issue no NVMe I/O.
-- Eight C-daemon integration tests exercise interactive action/resume,
+- The daemon integration tests exercise interactive action/resume,
   disconnect, cancellation, hold deadlines and failure cleanup.
 
 Not validated here: kernel BPF verifier acceptance/attachment, CO-RE relocation

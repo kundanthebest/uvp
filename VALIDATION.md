@@ -1,34 +1,24 @@
-# Validation — 19 November 2026
+# Validation
 
-The release is a source project with a functional no-hardware demo, orchestration API and real C/libbpf/eBPF implementation. It has not been validated against Kundan's physical SSDs or patched migration hosts.
+The repository has a hardware-independent suite for the controller and daemon. GitHub Actions builds the production Linux artifacts, runs the tests, and records the result against the exact commit. [Build and test runs](https://github.com/kundanthebest/uvp/actions/workflows/tests.yml)
 
-| Check | Result |
+| What to check | How to reproduce |
 |---|---|
-| Production C/libbpf daemon build | Passed, Clang 19.1.7 / libbpf 1.5.0 toolchain |
-| Production eBPF object build | Passed, bpfel / mcpu=v3 |
-| Shared C matching/gate tests | Passed, warnings treated as errors |
-| Python API, orchestration, daemon and host tests | 46 run: 44 passed, 2 skipped |
-| Real Unix QMP socket tests | 2 skipped: AF_UNIX socket creation blocked in this environment |
-| Mocked QMP protocol and peer-PID checks | Passed |
-| Synthetic five-case userspace gate tests | Passed; no BPF loaded or NVMe commands submitted |
-| Host-action failure/deadline/interruption tests | Passed |
-| Guest launcher idempotence and acknowledgement mocks | Passed |
-| Daemon SIGKILL watchdog release | Passed using disposable process |
-| JavaScript syntax and DOM ID references | Passed |
-| Shell syntax, Python compilation, JSON parsing | Passed |
-| Preserved migration v3 script | Byte-for-byte comparison passed |
-| Browser visual/end-to-end UI validation | Not performed: local browser runtime unavailable and cloud browser could not reach the local preview |
-| BPF verifier, CO-RE relocation and live attachment | Not tested |
-| Patched QEMU/kernel command compatibility | Not tested on lab hosts |
-| Real NVMe reset/deletion and two-PC migration | Not tested |
-| Guest I/O continuity / data integrity | Not tested |
+| Native HTTP service and helpers | `make controller` |
+| Native libbpf daemon and BPF object | Install the hardware build dependencies, then run `make build CLANG=/usr/bin/clang` |
+| Controller API, run transitions, host identity, action/release and recovery cases | `make test` |
+| Offline dashboard, including automatic, manual and cancelled runs | `bash demo/build.sh && node demo/check.cjs` |
+| Installed file integrity against the release | Run `sha256sum --check --quiet SHA256SUMS` from the checkout root |
 
-The final `make test` completed successfully. The complete output is in [tests/RESULTS.txt](tests/RESULTS.txt). The source package keeps executable permissions on shell helpers and excludes locally built binaries; build the daemon and hooks together on your Linux host.
+The daemon’s synthetic tests use disposable child processes and mocked host/guest actions. They exercise command matching, group-stop observation, release ordering, failure, deadlines and SIGKILL watchdog recovery. The offline dashboard test runs its simulation with a deterministic clock. Local execution environments that block sockets can prevent a loopback HTTP or Unix QMP test from running. Check the test output for each environment.
 
-Tests exercise automatic action exactly once, automatic/manual release, action failure cleanup, cancellation, control-channel EOF, hold deadlines, watchdog recovery, stale runs, token/origin protection, configured argv quoting, host input validation, destination-first preparation, PID/device drift checks, concurrent-operation guards, destructive-target acknowledgement, generic selector bounds and migration-start state guards.
+## Lab validation
 
-The host bridge tests mock NVMe calls. A test log saying `Executing namespace-delete` describes mocked argv validation; no namespace was deleted. No live migration, reset or hardware mutation was performed in this environment.
+Live attachment to your kernel, CO-RE relocations, vendor wrapper names, patched QEMU behavior, real NVMe resets/deletions, and data integrity across two physical PCs need a lab run. The stock examples contain placeholder devices, addresses, namespace IDs and executable paths.
 
-`DONE` means checkpoint cycle completion. `migration_script_status` is a separate script outcome. `migration_result` remains `NOT VERIFIED`; neither a demo nor a zero script exit code proves data integrity.
+1. Run preflight and prepare both hosts with your known-good VM setup. Verify the QMP peer, source `running` and destination `inmigrate`.
+2. Choose source Suspend with the no-op profile for the first checkpoint. Arm the daemon, wait for `ARMED`, then launch migration.
+3. Compare UVP’s stop, action and release events with both QEMU logs and migration-script output. Verify guest I/O on the destination.
+4. Repeat with the configured reset or disposable namespace profile. Record the checkpoint result, script result and data-integrity result individually.
 
-First hardware run: retain the known-working kernel/QEMU and source/destination launchers, configure both host JSON files and controller profiles, run preflight and preparation, select a no-op checkpoint, load hooks, and then start migration. The daemon must report ARMED before migration starts. Validate the real gate before enabling the intended reset or namespace-deletion action. See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
+The provided `DONE` status describes the checkpoint cycle. A completed migration script still requires a destination-side guest/workload check. [Detailed deployment and recovery](docs/DEPLOYMENT.md)

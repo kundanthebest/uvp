@@ -60,8 +60,7 @@
       "enabled": true,
       "description": "Reset the explicitly configured host controller; verify PF/VF scope before enabling.",
       "argv": [
-        "/usr/bin/python3",
-        "/opt/uvp-orchestrator/scripts/host-action.py",
+        "/opt/uvp-orchestrator/scripts/host-action.sh",
         "nvme-reset",
         "/dev/nvme1"
       ]
@@ -73,8 +72,7 @@
       "enabled": true,
       "description": "Uses sysfs FLR only. May be refused while VFIO owns the VF.",
       "argv": [
-        "/usr/bin/python3",
-        "/opt/uvp-orchestrator/scripts/host-action.py",
+        "/opt/uvp-orchestrator/scripts/host-action.sh",
         "vf-flr",
         "0000:83:00.1"
       ]
@@ -107,8 +105,7 @@
       "enabled": true,
       "description": "Reset the explicitly configured host controller; verify PF/VF scope before enabling.",
       "argv": [
-        "/usr/bin/python3",
-        "/opt/uvp-orchestrator/scripts/host-action.py",
+        "/opt/uvp-orchestrator/scripts/host-action.sh",
         "nvme-reset",
         "/dev/nvme1"
       ]
@@ -120,8 +117,7 @@
       "enabled": true,
       "description": "Uses sysfs FLR only. May be refused while VFIO owns the VF.",
       "argv": [
-        "/usr/bin/python3",
-        "/opt/uvp-orchestrator/scripts/host-action.py",
+        "/opt/uvp-orchestrator/scripts/host-action.sh",
         "vf-flr",
         "0000:83:00.1"
       ]
