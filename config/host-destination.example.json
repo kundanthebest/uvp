@@ -1,0 +1,34 @@
+{
+  "role": "destination",
+  "controller": "/dev/nvme0",
+  "cntlid": 2,
+  "qemu_executable": "/opt/qemu-hmlm/bin/qemu-system-x86_64",
+  "launch_argv": [
+    "/bin/bash",
+    "/opt/uvp-migration/DEST.sh"
+  ],
+  "qmp_socket": "/run/uvp-hmlm/destination.qmp",
+  "pidfile": "/run/uvp-hmlm/destination.pid",
+  "launch_timeout": 90,
+  "launch_log": "/var/log/uvp/destination.log",
+  "daemon": "/opt/uvp-orchestrator/vendor/uvp-live-fio/bin/uvp-daemon",
+  "bpf": "/opt/uvp-orchestrator/vendor/uvp-live-fio/bin/hooks.bpf.o",
+  "environment": {
+    "SOURCE_QMP": "/run/uvp-hmlm/source.qmp",
+    "DEST_QMP": "/run/uvp-hmlm/destination.qmp",
+    "HMLM_CTRL": "/dev/nvme0",
+    "HMLM_SRC": "/dev/nvme0n1",
+    "HMLM_MCID": "1",
+    "HMLM_NSID": "1",
+    "MIGRATION_PORT": "4444",
+    "NVME_NBD_PORT": "10809",
+    "NVME_NBD_EXPORT": "uvp-nvme",
+    "ROOT_NBD_PORT": "10810",
+    "QMP_EVENT_LOG": "/var/log/uvp/qmp-events.log"
+  },
+  "migration_argv": [
+    "/bin/bash",
+    "/opt/uvp-orchestrator/migration/migrate-cross-host-repeat-safe-v3.sh"
+  ],
+  "migration_timeout": 1700
+}

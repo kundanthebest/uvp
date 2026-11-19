@@ -1,0 +1,209 @@
+{
+  "demo": false,
+  "require_prepare": true,
+  "action_timeout": 120,
+  "hosts": {
+    "source": {
+      "transport": "ssh",
+      "ssh_target": "uvp@source-host",
+      "address": "source-host",
+      "user": "uvp",
+      "ssh_port": 22,
+      "identity_file": "/home/uvp/.ssh/id_ed25519",
+      "known_hosts_file": "/home/uvp/.ssh/known_hosts",
+      "privilege_prefix": [
+        "/usr/bin/sudo",
+        "-n",
+        "--"
+      ],
+      "bridge": "/opt/uvp-orchestrator/scripts/host-bridge.py",
+      "daemon": "/opt/uvp-orchestrator/vendor/uvp-live-fio/bin/uvp-daemon",
+      "bpf": "/opt/uvp-orchestrator/vendor/uvp-live-fio/bin/hooks.bpf.o",
+      "pid": 0,
+      "controller": "/dev/nvme0",
+      "cntlid": 1
+    },
+    "destination": {
+      "transport": "ssh",
+      "ssh_target": "uvp@destination-host",
+      "address": "destination-host",
+      "user": "uvp",
+      "ssh_port": 22,
+      "identity_file": "/home/uvp/.ssh/id_ed25519",
+      "known_hosts_file": "/home/uvp/.ssh/known_hosts",
+      "privilege_prefix": [
+        "/usr/bin/sudo",
+        "-n",
+        "--"
+      ],
+      "bridge": "/opt/uvp-orchestrator/scripts/host-bridge.py",
+      "daemon": "/opt/uvp-orchestrator/vendor/uvp-live-fio/bin/uvp-daemon",
+      "bpf": "/opt/uvp-orchestrator/vendor/uvp-live-fio/bin/hooks.bpf.o",
+      "pid": 0,
+      "controller": "/dev/nvme0",
+      "cntlid": 2
+    }
+  },
+  "actions": {
+    "source-nvme-reset": {
+      "label": "NVMe controller reset \u00b7 source",
+      "kind": "host",
+      "host": "source",
+      "enabled": false,
+      "description": "Resets the configured host controller; migration may fail as a test result.",
+      "destructive": false,
+      "controller": "/dev/nvme0",
+      "argv": [
+        "/usr/bin/python3",
+        "/opt/uvp-orchestrator/scripts/host-action.py",
+        "nvme-reset",
+        "/dev/nvme0"
+      ]
+    },
+    "source-namespace-delete": {
+      "label": "Delete test namespace \u00b7 source",
+      "kind": "host",
+      "host": "source",
+      "enabled": false,
+      "description": "Permanently deletes the explicitly configured test namespace. Configure and enable only on disposable lab storage.",
+      "destructive": true,
+      "controller": "/dev/nvme0",
+      "argv": [
+        "/usr/bin/python3",
+        "/opt/uvp-orchestrator/scripts/host-action.py",
+        "namespace-delete",
+        "/dev/nvme0",
+        "--nsid",
+        "1"
+      ],
+      "nsid": 1
+    },
+    "source-vf-flr": {
+      "label": "VF function-level reset \u00b7 source",
+      "kind": "host",
+      "host": "source",
+      "enabled": false,
+      "description": "Requests FLR on an explicitly configured VF. Replace the sample BDF before enabling.",
+      "destructive": false,
+      "controller": "/dev/nvme0",
+      "argv": [
+        "/usr/bin/python3",
+        "/opt/uvp-orchestrator/scripts/host-action.py",
+        "vf-flr",
+        "0000:83:00.1"
+      ]
+    },
+    "source-noop": {
+      "label": "Observe only \u00b7 source",
+      "kind": "host",
+      "host": "source",
+      "enabled": true,
+      "description": "Checkpoint + confirmed stop + no-op + release for initial wiring validation.",
+      "argv": [
+        "/bin/true"
+      ]
+    },
+    "destination-nvme-reset": {
+      "label": "NVMe controller reset \u00b7 destination",
+      "kind": "host",
+      "host": "destination",
+      "enabled": false,
+      "description": "Resets the configured host controller; migration may fail as a test result.",
+      "destructive": false,
+      "controller": "/dev/nvme0",
+      "argv": [
+        "/usr/bin/python3",
+        "/opt/uvp-orchestrator/scripts/host-action.py",
+        "nvme-reset",
+        "/dev/nvme0"
+      ]
+    },
+    "destination-namespace-delete": {
+      "label": "Delete test namespace \u00b7 destination",
+      "kind": "host",
+      "host": "destination",
+      "enabled": false,
+      "description": "Permanently deletes the explicitly configured test namespace. Configure and enable only on disposable lab storage.",
+      "destructive": true,
+      "controller": "/dev/nvme0",
+      "argv": [
+        "/usr/bin/python3",
+        "/opt/uvp-orchestrator/scripts/host-action.py",
+        "namespace-delete",
+        "/dev/nvme0",
+        "--nsid",
+        "1"
+      ],
+      "nsid": 1
+    },
+    "destination-vf-flr": {
+      "label": "VF function-level reset \u00b7 destination",
+      "kind": "host",
+      "host": "destination",
+      "enabled": false,
+      "description": "Requests FLR on an explicitly configured VF. Replace the sample BDF before enabling.",
+      "destructive": false,
+      "controller": "/dev/nvme0",
+      "argv": [
+        "/usr/bin/python3",
+        "/opt/uvp-orchestrator/scripts/host-action.py",
+        "vf-flr",
+        "0000:83:00.1"
+      ]
+    },
+    "destination-noop": {
+      "label": "Observe only \u00b7 destination",
+      "kind": "host",
+      "host": "destination",
+      "enabled": true,
+      "description": "Checkpoint + confirmed stop + no-op + release for initial wiring validation.",
+      "argv": [
+        "/bin/true"
+      ]
+    }
+  },
+  "jobs": {
+    "source": {
+      "label": "Prepare source VM",
+      "kind": "setup",
+      "host": "source",
+      "enabled": true,
+      "bridge_verb": "prepare",
+      "use_privilege": true,
+      "argv": [
+        "/usr/bin/python3",
+        "/opt/uvp-orchestrator/scripts/host-bridge.py",
+        "prepare"
+      ],
+      "timeout": 120
+    },
+    "destination": {
+      "label": "Prepare destination VM",
+      "kind": "setup",
+      "host": "destination",
+      "enabled": true,
+      "bridge_verb": "prepare",
+      "use_privilege": true,
+      "argv": [
+        "/usr/bin/python3",
+        "/opt/uvp-orchestrator/scripts/host-bridge.py",
+        "prepare"
+      ],
+      "timeout": 120
+    },
+    "migrate": {
+      "label": "Start cross-host live migration",
+      "kind": "migration",
+      "host": "source",
+      "enabled": true,
+      "bridge_verb": "migrate",
+      "use_privilege": true,
+      "argv": [
+        "/usr/bin/python3",
+        "/opt/uvp-orchestrator/scripts/host-bridge.py",
+        "migrate"
+      ],
+      "timeout": 1800
+    }
+  }
+}

@@ -1,0 +1,290 @@
+{
+  "demo": false,
+  "action_timeout": 300,
+  "hosts": {
+    "source": {
+      "transport": "local",
+      "ssh_target": "uvp@destination-host",
+      "ssh_port": 22,
+      "identity_file": "/home/uvp/.ssh/id_ed25519",
+      "known_hosts_file": "/home/uvp/.ssh/known_hosts",
+      "privilege_prefix": [
+        "/usr/bin/sudo",
+        "-n",
+        "--"
+      ],
+      "daemon": "/opt/uvp-control/vendor/uvp-live-fio/bin/uvp-daemon",
+      "bpf": "/opt/uvp-control/vendor/uvp-live-fio/bin/hooks.bpf.o",
+      "pid": 0,
+      "controller": "/dev/nvme0",
+      "cntlid": 1
+    },
+    "destination": {
+      "transport": "ssh",
+      "ssh_target": "uvp@destination-host",
+      "ssh_port": 22,
+      "identity_file": "/home/uvp/.ssh/id_ed25519",
+      "known_hosts_file": "/home/uvp/.ssh/known_hosts",
+      "privilege_prefix": [
+        "/usr/bin/sudo",
+        "-n",
+        "--"
+      ],
+      "daemon": "/opt/uvp-control/vendor/uvp-live-fio/bin/uvp-daemon",
+      "bpf": "/opt/uvp-control/vendor/uvp-live-fio/bin/hooks.bpf.o",
+      "pid": 0,
+      "controller": "/dev/nvme0",
+      "cntlid": 2
+    }
+  },
+  "actions": {
+    "source-fio": {
+      "label": "fio after release \u00b7 source daemon",
+      "kind": "guest",
+      "host": "source",
+      "enabled": false,
+      "description": "Queues guest fio through the original SSH launcher; guest must become runnable.",
+      "argv": [
+        "/opt/uvp-control/vendor/uvp-live-fio/scripts/start-fio.sh",
+        "/opt/uvp-control/config/uvp.conf"
+      ]
+    },
+    "source-nvme-reset": {
+      "label": "NVMe controller reset \u00b7 source",
+      "kind": "host",
+      "host": "source",
+      "enabled": false,
+      "description": "Reset the explicitly configured host controller; verify PF/VF scope before enabling.",
+      "argv": [
+        "/usr/bin/python3",
+        "/opt/uvp-control/scripts/host-action.py",
+        "nvme-reset",
+        "/dev/nvme1"
+      ]
+    },
+    "source-vf-flr": {
+      "label": "VF FLR \u00b7 source",
+      "kind": "host",
+      "host": "source",
+      "enabled": false,
+      "description": "Uses sysfs FLR only. May be refused while VFIO owns the VF.",
+      "argv": [
+        "/usr/bin/python3",
+        "/opt/uvp-control/scripts/host-action.py",
+        "vf-flr",
+        "0000:83:00.1"
+      ]
+    },
+    "source-custom": {
+      "label": "Custom host action \u00b7 source",
+      "kind": "host",
+      "host": "source",
+      "enabled": false,
+      "description": "Replace argv with your validated workload/reset/injection script.",
+      "argv": [
+        "/bin/true"
+      ]
+    },
+    "destination-fio": {
+      "label": "fio after release \u00b7 destination daemon",
+      "kind": "guest",
+      "host": "destination",
+      "enabled": false,
+      "description": "Queues guest fio through the original SSH launcher; guest must become runnable.",
+      "argv": [
+        "/opt/uvp-control/vendor/uvp-live-fio/scripts/start-fio.sh",
+        "/opt/uvp-control/config/uvp.conf"
+      ]
+    },
+    "destination-nvme-reset": {
+      "label": "NVMe controller reset \u00b7 destination",
+      "kind": "host",
+      "host": "destination",
+      "enabled": false,
+      "description": "Reset the explicitly configured host controller; verify PF/VF scope before enabling.",
+      "argv": [
+        "/usr/bin/python3",
+        "/opt/uvp-control/scripts/host-action.py",
+        "nvme-reset",
+        "/dev/nvme1"
+      ]
+    },
+    "destination-vf-flr": {
+      "label": "VF FLR \u00b7 destination",
+      "kind": "host",
+      "host": "destination",
+      "enabled": false,
+      "description": "Uses sysfs FLR only. May be refused while VFIO owns the VF.",
+      "argv": [
+        "/usr/bin/python3",
+        "/opt/uvp-control/scripts/host-action.py",
+        "vf-flr",
+        "0000:83:00.1"
+      ]
+    },
+    "destination-custom": {
+      "label": "Custom host action \u00b7 destination",
+      "kind": "host",
+      "host": "destination",
+      "enabled": false,
+      "description": "Replace argv with your validated workload/reset/injection script.",
+      "argv": [
+        "/bin/true"
+      ]
+    },
+    "source-timeout": {
+      "label": "Arm one host I/O timeout \u00b7 source",
+      "kind": "host",
+      "host": "source",
+      "enabled": false,
+      "description": "Targets host-bound /dev/nvme1n1 only. Does not intercept I/O on a VF assigned to a VM. Restore with the disarm job.",
+      "argv": [
+        "/bin/bash",
+        "/opt/uvp-control/scripts/inject_one_timeout_nvme1n1.sh",
+        "--arm"
+      ]
+    },
+    "destination-timeout": {
+      "label": "Arm one host I/O timeout \u00b7 destination",
+      "kind": "host",
+      "host": "destination",
+      "enabled": false,
+      "description": "Targets host-bound /dev/nvme1n1 only. Does not intercept I/O on a VF assigned to a VM. Restore with the disarm job.",
+      "argv": [
+        "/bin/bash",
+        "/opt/uvp-control/scripts/inject_one_timeout_nvme1n1.sh",
+        "--arm"
+      ]
+    }
+  },
+  "jobs": {
+    "source": {
+      "label": "Launch source.sh",
+      "kind": "setup",
+      "host": "source",
+      "enabled": false,
+      "argv": [
+        "/bin/bash",
+        "/opt/uvp-migration/source.sh"
+      ]
+    },
+    "destination": {
+      "label": "Launch DEST.sh",
+      "kind": "setup",
+      "host": "destination",
+      "enabled": false,
+      "argv": [
+        "/bin/bash",
+        "/opt/uvp-migration/DEST.sh"
+      ]
+    },
+    "prepare": {
+      "label": "Prepare guest runner",
+      "kind": "prepare",
+      "host": "source",
+      "enabled": false,
+      "argv": [
+        "/opt/uvp-control/vendor/uvp-live-fio/scripts/prepare-guest.sh",
+        "/opt/uvp-control/config/uvp.conf"
+      ]
+    },
+    "migrate": {
+      "label": "Start migrate.sh",
+      "kind": "migration",
+      "host": "source",
+      "enabled": false,
+      "argv": [
+        "/bin/bash",
+        "/opt/uvp-migration/migrate.sh"
+      ],
+      "timeout": 900
+    },
+    "prestart": {
+      "label": "Start source fio before migration",
+      "kind": "workload",
+      "host": "source",
+      "enabled": false,
+      "argv": [
+        "/opt/uvp-control/vendor/uvp-live-fio/scripts/prestart-fio.sh",
+        "/opt/uvp-control/config/uvp.conf"
+      ]
+    },
+    "verify": {
+      "label": "Verify fio continuity",
+      "kind": "results",
+      "host": "source",
+      "enabled": false,
+      "argv": [
+        "/opt/uvp-control/vendor/uvp-live-fio/scripts/verify-continuity.sh",
+        "/opt/uvp-control/config/uvp.conf"
+      ]
+    },
+    "collect": {
+      "label": "Collect fio results",
+      "kind": "results",
+      "host": "source",
+      "enabled": false,
+      "argv": [
+        "/opt/uvp-control/vendor/uvp-live-fio/scripts/collect-results.sh",
+        "/opt/uvp-control/config/uvp.conf",
+        "destination"
+      ]
+    },
+    "source-timeout-status": {
+      "label": "Host timeout status \u00b7 source",
+      "kind": "results",
+      "host": "source",
+      "enabled": false,
+      "argv": [
+        "/usr/bin/sudo",
+        "-n",
+        "--",
+        "/bin/bash",
+        "/opt/uvp-control/scripts/inject_one_timeout_nvme1n1.sh",
+        "--status"
+      ]
+    },
+    "source-timeout-disarm": {
+      "label": "Host timeout disarm \u00b7 source",
+      "kind": "results",
+      "host": "source",
+      "enabled": false,
+      "argv": [
+        "/usr/bin/sudo",
+        "-n",
+        "--",
+        "/bin/bash",
+        "/opt/uvp-control/scripts/inject_one_timeout_nvme1n1.sh",
+        "--disarm"
+      ]
+    },
+    "destination-timeout-status": {
+      "label": "Host timeout status \u00b7 destination",
+      "kind": "results",
+      "host": "destination",
+      "enabled": false,
+      "argv": [
+        "/usr/bin/sudo",
+        "-n",
+        "--",
+        "/bin/bash",
+        "/opt/uvp-control/scripts/inject_one_timeout_nvme1n1.sh",
+        "--status"
+      ]
+    },
+    "destination-timeout-disarm": {
+      "label": "Host timeout disarm \u00b7 destination",
+      "kind": "results",
+      "host": "destination",
+      "enabled": false,
+      "argv": [
+        "/usr/bin/sudo",
+        "-n",
+        "--",
+        "/bin/bash",
+        "/opt/uvp-control/scripts/inject_one_timeout_nvme1n1.sh",
+        "--disarm"
+      ]
+    }
+  }
+}

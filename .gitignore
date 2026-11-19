@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+var/
+build/
+config/hardware.json
+config/uvp.conf
+vendor/uvp-live-fio/bin/
+*.sqlite3*
+.openai/
+node_modules/
+config/host.json
+config/host-source.json
+config/host-destination.json
+*.pem
+*.key
+.env
+.env.*

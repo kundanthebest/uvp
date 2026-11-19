@@ -1,0 +1,1 @@
+{"name":"uvp-control","version":"1.0.0","private":true,"description":"UVP live migration lab controller","scripts":{"dev":"python3 -m uvp_server.server --port ${PORT:-3000}","test":"python3 -m unittest discover -s tests -v"}}

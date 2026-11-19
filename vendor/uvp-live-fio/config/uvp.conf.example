@@ -1,0 +1,50 @@
+# Trusted Bash configuration. Do not source an untrusted config as root.
+# Copy to uvp.conf; use a NEW RUN_ID for EVERY migration. Same ID on both hosts.
+RUN_ID="change-me"
+OUTPUT_DIR="/tmp/uvp-live-fio-results"
+
+# Exact host process IDs; read your existing source/DEST QEMU pidfiles.
+# Only the relevant PID is used: source for cases 1/2, destination for 3/4.
+SOURCE_QEMU_PID=0
+DEST_QEMU_PID=0
+SOURCE_CONTROLLER="/dev/nvme0"
+DEST_CONTROLLER="/dev/nvme0"
+SOURCE_CNTLID=1
+DEST_CNTLID=2
+
+# Existing symbols in the supplied vfio-nvme RFC lineage. Override only with
+# an audited int-returning, complete-operation wrapper in YOUR current kernel.
+SUSPEND_SYMBOL="nvmevf_cmd_suspend_device"
+GET_SYMBOL="nvmevf_cmd_get_ctrl_state"
+SET_SYMBOL="nvmevf_cmd_set_ctrl_state"
+RESUME_SYMBOL="nvmevf_cmd_resume_device"
+
+# Guest SSH endpoints as seen FROM THE HOST RUNNING THE DAEMON.
+# Same-host forwarding example. For cross-host, DEST_GUEST_HOST must be reachable
+# from the source daemon for cases 1/2 (guest IP or remote host's exposed forward).
+SOURCE_GUEST_HOST="127.0.0.1"
+SOURCE_GUEST_PORT=2222
+DEST_GUEST_HOST="127.0.0.1"
+DEST_GUEST_PORT=2223
+GUEST_USER="ubuntu"
+SSH_KEY="/home/ubuntu/.ssh/id_ed25519"
+SSH_KNOWN_HOSTS="/home/ubuntu/.ssh/known_hosts"
+# Passwordless, pre-verified SSH + sudo -n inside the guest are prerequisites.
+
+# Default is destination: after cutover the source guest normally cannot run.
+# "source" is provided ONLY for an intentionally still-running-source setup.
+FIO_GUEST_SIDE="destination"
+GUEST_WAIT_SECONDS=240
+ACTION_TIMEOUT_SECONDS=300
+CHECKPOINT_TIMEOUT_SECONDS=300
+HOLD_MS=200
+DEBUG=0
+
+# Disposable mounted test filesystem INSIDE the guest. Never a raw device.
+# Refuses root filesystem, missing mountpoint, existing/symlinked test file.
+FIO_DIR="/mnt/test"
+FIO_SIZE_MB=256
+FIO_RUNTIME_SECONDS=300
+FIO_IODEPTH=8
+FIO_ENGINE="libaio"
+# This sample randrw job measures I/O progress; it does NOT do CRC verification.

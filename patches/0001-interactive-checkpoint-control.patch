@@ -1,0 +1,380 @@
+From: Kundan Kumar <kundan.kumar@samsung.com>
+Date: Mon, 16 Nov 2026 17:00:00 +0000
+Subject: [PATCH] uvp: add interactive checkpoint holds and host actions
+
+Add a bounded stdin control protocol for the UVP web coordinator. Permit a
+configured host argv to run once during an owned QEMU hold, followed by
+explicit release and the existing post-release guest action. Keep watchdog
+recovery, pidfd signalling and the original gate checks. Isolate action
+output from control stdout. Add an explicit no-BPF test build shim and an
+overridable daemon path for the original regression scripts.
+
+Signed-off-by: Kundan Kumar <kundan.kumar@samsung.com>
+---
+diff --git a/src/daemon.c b/src/daemon.c
+--- a/src/daemon.c
++++ b/src/daemon.c
+@@ -5,8 +5,12 @@
+  * migration-paused until destination activation. SIGCONT is NOT NVMe Resume.
+  */
+ #define _GNU_SOURCE
++#ifdef UVP_NO_BPF
++#include "no_bpf_test.h"
++#else
+ #include <bpf/bpf.h>
+ #include <bpf/libbpf.h>
++#endif
+ #include <errno.h>
+ #include <fcntl.h>
+ #include <getopt.h>
+@@ -49,10 +53,12 @@
+     struct ring_buffer *rb;
+     int config_fd, control_fd, stats_fd, pidfd, lockfd, wdpipe;
+     pid_t pid, worker, watchdog, mock;
+-    unsigned int timeout_s, action_timeout_s, hold_ms;
++    unsigned int timeout_s, action_timeout_s, hold_ms, hold_timeout_s;
++    unsigned int host_argc;
++    char *host_action[65];
+     const char *symbol, *bpf_path, *ready_path;
+     char **action;
+-    bool got_event, released, own_stop, selftest;
++    bool got_event, released, own_stop, selftest, interactive, host_ran;
+ };
+ static unsigned int number(const char *s, unsigned int min, unsigned int max)
+ {
+@@ -69,6 +75,8 @@
+     fprintf(f, "uvp-daemon --pid PID --case 1|2|3|4 --controller /dev/nvmeN\n"
+         "  --cntlid ID [--phase-symbol NAME] [--bpf FILE] [--timeout SEC]\n"
+         "  [--action-timeout SEC] [--hold-ms MS] [--ready-file FILE] [--debug]\n"
++        "  [--control-stdin --hold-timeout SEC]\n"
++        "  [--host-action-program FILE --host-action-arg ARG ...]\n"
+         "  -- /absolute/action-script [args...]\n\n"
+         "--selftest --case N -- /bin/true: synthetic event, no BPF/NVMe/VM.\n"
+         "Guest action is QUEUED while stopped, EXECUTED after SIGCONT.\n");
+@@ -78,16 +86,18 @@
+     int x;
+     const char *controller = NULL;
+     enum {PID=1000, CASE, CONTROLLER, CNTLID, SYMBOL, BPF, TIMEOUT, ACTIONTIME,
+-          HOLD, READY, DEBUG, SELFTEST};
++          HOLD, READY, DEBUG, SELFTEST, INTERACTIVE, HOLDTIME, HOSTPROGRAM, HOSTARG};
+     static const struct option opts[] = {
+         {"pid",1,0,PID}, {"case",1,0,CASE}, {"controller",1,0,CONTROLLER},
+         {"cntlid",1,0,CNTLID}, {"phase-symbol",1,0,SYMBOL}, {"bpf",1,0,BPF},
+         {"timeout",1,0,TIMEOUT}, {"action-timeout",1,0,ACTIONTIME},
+         {"hold-ms",1,0,HOLD}, {"ready-file",1,0,READY}, {"debug",0,0,DEBUG},
+-        {"selftest",0,0,SELFTEST}, {"help",0,0,'h'}, {0,0,0,0}
++        {"selftest",0,0,SELFTEST}, {"control-stdin",0,0,INTERACTIVE},
++        {"hold-timeout",1,0,HOLDTIME}, {"host-action-program",1,0,HOSTPROGRAM},
++        {"host-action-arg",1,0,HOSTARG}, {"help",0,0,'h'}, {0,0,0,0}
+     };
+     a->timeout_s = 300; a->action_timeout_s = 300; a->hold_ms = 200;
+-    a->cfg.cntlid = UINT_MAX;
++    a->cfg.cntlid = UINT_MAX; a->hold_timeout_s = 60;
+     while ((x=getopt_long(argc,argv,"+h",opts,NULL)) != -1) {
+         switch (x) {
+         case PID: a->pid = number(optarg,2,INT_MAX); break;
+@@ -102,12 +112,27 @@
+         case READY: a->ready_path = optarg; break;
+         case DEBUG: verbose = true; a->cfg.debug = 1; break;
+         case SELFTEST: a->selftest = true; break;
++        case INTERACTIVE: a->interactive = true; break;
++        case HOLDTIME: a->hold_timeout_s = number(optarg,1,600); break;
++        case HOSTPROGRAM:
++            if (a->host_argc || optarg[0] != '/') return -1;
++            a->host_action[a->host_argc++] = optarg; break;
++        case HOSTARG:
++            if (!a->host_argc || a->host_argc >= 64) return -1;
++            a->host_action[a->host_argc++] = optarg; break;
+         case 'h': usage(stdout); exit(0);
+         default: return -1;
+         }
+     }
+     if (!a->cfg.testcase || optind >= argc) return -1;
+     a->action = argv + optind;
++    if (a->host_argc && !a->interactive) return -1;
++#ifdef UVP_NO_BPF
++    if (!a->selftest) {
++        fprintf(stderr,"This test-only binary cannot load BPF or target QEMU.\n");
++        return -1;
++    }
++#endif
+     if (!a->symbol) a->symbol = symbols[a->cfg.testcase];
+     if (!a->bpf_path)
+         a->bpf_path = access("bin/hooks.bpf.o", R_OK) == 0 ?
+@@ -198,7 +223,7 @@
+     return a->control_fd>=0 && !bpf_map_lookup_elem(a->control_fd,&zero,&c) &&
+            c.request_ns && c.signal_rc==0;
+ }
+-/* Independent fail-open watchdog for this non-destructive fio launcher.
++/* Independent bounded-hold watchdog. Release does not undo a host action.
+  * It never kills QEMU. It does NOT recover kernel/hardware hangs. */
+ static int start_watchdog(struct app *a)
+ {
+@@ -224,7 +249,7 @@
+             /* Mock event is generated after fork: parent sends I explicitly. */
+             if (a->selftest && q.revents && c=='I') a->own_stop=true;
+             if (stop_intent(a) && !intent_at) intent_at=now_ms();
+-            if (parent_dead || (intent_at && now_ms()-intent_at>10000)) {
++            if (parent_dead || (intent_at && now_ms()-intent_at>(a->interactive ? (uint64_t)a->hold_timeout_s*1000+5000 : 10000))) {
+                 disarm(a);
+                 if (intent_at) {
+                     uint64_t until=now_ms()+5000;
+@@ -274,6 +299,8 @@
+         snprintf(value,sizeof(value),"%llu",(unsigned long long)a->cfg.epoch);
+         setenv("UVP_EPOCH",value,1);
+         puts("ACTION_EXEC: QEMU released; guest command may now wait for guest readiness");
++        /* Keep action output off the machine-control stdout stream. */
++        if (dup2(STDERR_FILENO,STDOUT_FILENO)<0) _exit(125);
+         execvp(a->action[0],a->action);
+         perror("exec action"); _exit(127);
+     }
+@@ -281,6 +308,30 @@
+     *releasefd=p[1];
+     printf("ACTION_QUEUED worker=%d (not yet executed in guest)\n",a->worker);
+     return 0;
++}
++/* New UI protocol: only literal commands, never shell text or argv from stdin.
++ * EOF is an owner disconnect. The daemon releases only its pidfd target. */
++static int read_control(void)
++{
++    static char line[32];
++    static size_t used;
++    for (;;) {
++        struct pollfd p={.fd=STDIN_FILENO,.events=POLLIN|POLLHUP};
++        char c;
++        int r=poll(&p,1,0);
++        if (r<0) return errno==EINTR ? 0 : -1;
++        if (!r) return 0;
++        if (read(STDIN_FILENO,&c,1)!=1) return -1;
++        if (c=='\n') {
++            line[used]=0; used=0;
++            if (!strcmp(line,"resume")) return 1;
++            if (!strcmp(line,"action")) return 2;
++            if (!strcmp(line,"cancel")) return 3;
++            return -1;
++        }
++        if (used>=sizeof(line)-1) return -1;
++        line[used++]=c;
++    }
+ }
+ static int await_action(struct app *a)
+ {
+@@ -289,6 +340,11 @@
+     for (;;) {
+         pid_t r;
+         /* Deadline BEFORE wait and BEFORE accepting a successful completion. */
++        if (a->interactive) {
++            int c=read_control();
++            if (c<0 || c==3) interrupted=SIGTERM;
++            else if (c) puts("CONTROL_REJECTED: action is busy");
++        }
+         if (interrupted || now_ms()>=deadline) {
+             fprintf(stderr,"FAIL: action interrupted/timed out; no success inferred\n");
+             return -1;
+@@ -297,7 +353,7 @@
+         if (r==a->worker) {
+             a->worker=0;
+             if (now_ms()>=deadline || !WIFEXITED(status) || WEXITSTATUS(status)) {
+-                fprintf(stderr,"FAIL: guest action failed or completed after deadline\n");
++                fprintf(stderr,"FAIL: action failed or completed after deadline\n");
+                 return -1;
+             }
+             return 0;
+@@ -305,6 +361,67 @@
+         if (r<0 && errno!=EINTR) return -1;
+         sleep_ms(20);
+     }
++}
++static int interactive_hold(struct app *a)
++{
++    uint64_t until=now_ms()+(uint64_t)a->hold_timeout_s*1000;
++    printf("HOLD_READY timeout_s=%u\n",a->hold_timeout_s);
++    while (!interrupted && now_ms()<until && !pidfd_exited(a->pidfd)) {
++        int c=read_control();
++        if (c<0 || c==3) {
++            fprintf(stderr,"FAIL: control disconnected/cancelled\n"); return -1;
++        }
++        if (!all_threads_stopped(a->pid)) {
++            fprintf(stderr,"FAIL: QEMU left owned hold unexpectedly\n"); return -1;
++        }
++        if (c==1) return 0;
++        if (c==2) {
++            if (!a->host_argc || a->host_ran) {
++                puts("CONTROL_REJECTED: no host action or already executed");
++                continue;
++            }
++            a->host_ran=true;
++            puts("HOST_ACTION_STARTED");
++            a->worker=fork();
++            if (a->worker<0) return -1;
++            if (!a->worker) {
++                pid_t parent=getppid();
++                if (a->wdpipe>=0) close(a->wdpipe);
++                setpgid(0,0);
++                signal(SIGINT,SIG_DFL); signal(SIGTERM,SIG_DFL);
++                prctl(PR_SET_PDEATHSIG,SIGKILL);
++                if (getppid()!=parent) _exit(125);
++                int nullfd=open("/dev/null",O_RDONLY);
++                if (nullfd<0 || dup2(nullfd,STDIN_FILENO)<0) _exit(125);
++                close(nullfd);
++                char value[40];
++                snprintf(value,sizeof(value),"%u",a->cfg.testcase);
++                setenv("UVP_TESTCASE",value,1);
++                snprintf(value,sizeof(value),"%d",a->pid);
++                setenv("UVP_QEMU_TGID",value,1);
++                snprintf(value,sizeof(value),"%llu",(unsigned long long)a->cfg.epoch);
++                setenv("UVP_EPOCH",value,1);
++                if (dup2(STDERR_FILENO,STDOUT_FILENO)<0) _exit(125);
++                execv(a->host_action[0],a->host_action);
++                perror("exec host action"); _exit(127);
++            }
++            setpgid(a->worker,a->worker);
++            /* Bound worker to remaining hold time, not a fresh hold interval. */
++            unsigned int saved=a->action_timeout_s;
++            unsigned int remaining=(until>now_ms()) ? (until-now_ms())/1000 : 0;
++            if (!remaining) return -1;
++            if (a->action_timeout_s>remaining) a->action_timeout_s=remaining;
++            int rc=await_action(a);
++            a->action_timeout_s=saved;
++            if (rc || now_ms()>=until || !all_threads_stopped(a->pid)) {
++                fprintf(stderr,"HOST_ACTION_FAILED\n"); return -1;
++            }
++            puts("HOST_ACTION_DONE");
++        }
++        sleep_ms(20);
++    }
++    fprintf(stderr,"FAIL: hold deadline/interruption/target exit\n");
++    return -1;
+ }
+ static void cleanup(struct app *a)
+ {
+@@ -398,6 +515,11 @@
+         on_event(&a,&a.event,sizeof(a.event));
+     }
+     while(!a.got_event && !interrupted && now_ms()<deadline && !pidfd_exited(a.pidfd)) {
++        if (a.interactive) {
++            int command=read_control();
++            if (command<0 || command==3) { interrupted=SIGTERM; break; }
++            if (command) puts("CONTROL_REJECTED: checkpoint not held");
++        }
+         int r=ring_buffer__poll(a.rb,50);
+         if(r<0 && r!=-EINTR) goto out;
+         struct uvp_control c={};
+@@ -416,10 +538,15 @@
+     a.own_stop=true;
+     if(wait_for_stop(&a)) { fprintf(stderr,"FAIL: no confirmed group stop\n"); goto out; }
+     printf("STOP_CONFIRMED pid=%d host_mono_ms=%llu\n",a.pid,(unsigned long long)now_ms());
+-    sleep_ms(a.hold_ms);
+-    if(interrupted || now_ms()>=deadline || !all_threads_stopped(a.pid)) goto out;
++    if (a.interactive) {
++        if (interactive_hold(&a)) goto out;
++    } else {
++        sleep_ms(a.hold_ms);
++        if (now_ms()>=deadline) goto out;
++    }
++    if(interrupted || !all_threads_stopped(a.pid)) goto out;
+     if(queue_action(&a,&releasefd)) goto out;
+-    if(interrupted || now_ms()>=deadline) goto out;
++    if(interrupted || (!a.interactive && now_ms()>=deadline)) goto out;
+     disarm(&a);
+     if(signal_pidfd(a.pidfd,SIGCONT)) goto out;
+     a.released=true;
+diff --git a/include/no_bpf_test.h b/include/no_bpf_test.h
+new file mode 100644
+--- /dev/null
++++ b/include/no_bpf_test.h
+@@ -0,0 +1,30 @@
++/* SPDX-License-Identifier: GPL-2.0-only
++ * Test-only build shim. Production uses official libbpf headers and library.
++ * These functions deliberately cannot load or attach BPF. */
++#ifndef UVP_NO_BPF_TEST_H
++#define UVP_NO_BPF_TEST_H
++#include <stdarg.h>
++#include <stdbool.h>
++#include <stddef.h>
++#include <stdint.h>
++#include <linux/bpf.h>
++struct bpf_object; struct bpf_program; struct bpf_link; struct ring_buffer;
++enum libbpf_print_level { LIBBPF_WARN, LIBBPF_INFO, LIBBPF_DEBUG };
++#define UNUSED __attribute__((unused))
++static inline int bpf_map_update_elem(int f UNUSED,const void*k UNUSED,const void*v UNUSED,uint64_t x UNUSED){return -1;}
++static inline int bpf_map_lookup_elem(int f UNUSED,const void*k UNUSED,void*v UNUSED){return -1;}
++static inline void libbpf_set_print(int(*p)(enum libbpf_print_level,const char*,va_list) UNUSED){}
++static inline long libbpf_get_error(const void*p UNUSED){return -1;}
++static inline struct bpf_object*bpf_object__open_file(const char*p UNUSED,const void*o UNUSED){return NULL;}
++static inline int bpf_object__load(struct bpf_object*p UNUSED){return -1;}
++static inline int bpf_object__find_map_fd_by_name(struct bpf_object*p UNUSED,const char*n UNUSED){return -1;}
++static inline struct bpf_program*bpf_object__find_program_by_name(struct bpf_object*p UNUSED,const char*n UNUSED){return NULL;}
++static inline struct bpf_link*bpf_program__attach_kprobe(struct bpf_program*p UNUSED,bool r UNUSED,const char*t UNUSED){return NULL;}
++static inline struct bpf_link*bpf_program__attach_raw_tracepoint(struct bpf_program*p UNUSED,const char*t UNUSED){return NULL;}
++static inline struct bpf_link*bpf_program__attach_tracepoint(struct bpf_program*p UNUSED,const char*c UNUSED,const char*t UNUSED){return NULL;}
++static inline struct ring_buffer*ring_buffer__new(int f UNUSED,int(*p)(void*,void*,size_t) UNUSED,void*c UNUSED,const void*o UNUSED){return NULL;}
++static inline int ring_buffer__poll(struct ring_buffer*p UNUSED,int t UNUSED){return -1;}
++static inline void ring_buffer__free(struct ring_buffer*p UNUSED){}
++static inline void bpf_link__destroy(struct bpf_link*p UNUSED){}
++static inline void bpf_object__close(struct bpf_object*p UNUSED){}
++#endif
+diff --git a/tests/test-userspace.sh b/tests/test-userspace.sh
+--- a/tests/test-userspace.sh
++++ b/tests/test-userspace.sh
+@@ -5,23 +5,23 @@
+ work=$(mktemp -d)
+ trap 'rm -rf "$work"' EXIT
+ for tc in 1 2 3 4; do
+-    "$root/bin/uvp-daemon" --selftest --case "$tc" --hold-ms 50 -- /bin/true >"$work/tc$tc" 2>&1
++    "${UVP_DAEMON:-$root/bin/uvp-daemon}" --selftest --case "$tc" --hold-ms 50 -- /bin/true >"$work/tc$tc" 2>&1
+     grep -q STOP_CONFIRMED "$work/tc$tc"
+     grep -q ACTION_ACKNOWLEDGED "$work/tc$tc"
+     awk '/SIGCONT pid=/{released=1} /ACTION_EXEC:/{if(!released) exit 1}' "$work/tc$tc"
+ done
+ echo 'PASS: four synthetic events -> stop -> queue -> SIGCONT -> worker'
+-if "$root/bin/uvp-daemon" --selftest --case 1 -- /bin/false >"$work/fail" 2>&1; then
++if "${UVP_DAEMON:-$root/bin/uvp-daemon}" --selftest --case 1 -- /bin/false >"$work/fail" 2>&1; then
+     echo 'FAIL: negative action accepted'; exit 1
+ fi
+ ! grep -q ACTION_ACKNOWLEDGED "$work/fail"
+ echo 'PASS: action failure cannot report success'
+-if "$root/bin/uvp-daemon" --selftest --case 1 --action-timeout 1 -- /bin/sleep 3 >"$work/timeout" 2>&1; then
++if "${UVP_DAEMON:-$root/bin/uvp-daemon}" --selftest --case 1 --action-timeout 1 -- /bin/sleep 3 >"$work/timeout" 2>&1; then
+     echo 'FAIL: action deadline ignored'; exit 1
+ fi
+ ! grep -q ACTION_ACKNOWLEDGED "$work/timeout"
+ echo 'PASS: action deadline is enforced'
+-"$root/bin/uvp-daemon" --selftest --case 1 --hold-ms 3000 -- /bin/true >"$work/interrupt" 2>&1 &
++"${UVP_DAEMON:-$root/bin/uvp-daemon}" --selftest --case 1 --hold-ms 3000 -- /bin/true >"$work/interrupt" 2>&1 &
+ pid=$!
+ for _ in {1..200}; do
+     grep -q STOP_CONFIRMED "$work/interrupt" && break
+diff --git a/tests/test-action-mock.sh b/tests/test-action-mock.sh
+--- a/tests/test-action-mock.sh
++++ b/tests/test-action-mock.sh
+@@ -35,7 +35,7 @@
+ CONF
+ mkdir -p "$tmp/results/mock-action"
+ printf "BOOT_ID=fake-boot\n" > "$tmp/results/mock-action/prepared.status"
+-PATH="$tmp/bin:$PATH" "$root/bin/uvp-daemon" --selftest --case 2 -- \
++PATH="$tmp/bin:$PATH" "${UVP_DAEMON:-$root/bin/uvp-daemon}" --selftest --case 2 -- \
+     "$root/scripts/start-fio.sh" "$tmp/conf" > "$tmp/log" 2>&1
+ grep -q '^FIO_ACK:' "$tmp/log"
+ grep -q 'ACTION_ACKNOWLEDGED' "$tmp/log"
+@@ -43,7 +43,7 @@
+ echo 'PASS: real host action queues after release and receives mocked guest acknowledgement'
+ # Bad guest endpoint/preparation is an action failure, not retry-success.
+ printf '#!/bin/sh\nexit 70\n' > "$tmp/bin/ssh"
+-if PATH="$tmp/bin:$PATH" "$root/bin/uvp-daemon" --selftest --case 3 -- \
++if PATH="$tmp/bin:$PATH" "${UVP_DAEMON:-$root/bin/uvp-daemon}" --selftest --case 3 -- \
+     "$root/scripts/start-fio.sh" "$tmp/conf" > "$tmp/fail" 2>&1; then
+     echo 'FAIL: missing guest preparation accepted'; exit 1
+ fi
+diff --git a/tests/test-watchdog.sh b/tests/test-watchdog.sh
+--- a/tests/test-watchdog.sh
++++ b/tests/test-watchdog.sh
+@@ -10,7 +10,7 @@
+     rm -rf "$tmp"
+ }
+ trap cleanup EXIT
+-"$root/bin/uvp-daemon" --selftest --case 1 --hold-ms 5000 -- /bin/true > "$tmp/log" 2>&1 &
++"${UVP_DAEMON:-$root/bin/uvp-daemon}" --selftest --case 1 --hold-ms 5000 -- /bin/true > "$tmp/log" 2>&1 &
+ daemon=$!
+ for _ in {1..300}; do grep -q '^STOP_CONFIRMED' "$tmp/log" && break; sleep .01; done
+ grep -q '^STOP_CONFIRMED' "$tmp/log"

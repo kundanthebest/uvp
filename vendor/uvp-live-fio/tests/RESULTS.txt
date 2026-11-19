@@ -1,0 +1,13 @@
+Validation run 2026-10-16. No kernel/NVMe/QEMU/real guest workload tests.
+PASS: decoder + gate-decision unit tests (not BPF execution)
+PASS: four synthetic events -> stop -> queue -> SIGCONT -> worker
+PASS: action failure cannot report success
+PASS: action deadline is enforced
+PASS: interruption cannot satisfy a successful testcase
+PASS: duplicate/lost-ack retries cannot create a second fake fio process
+PASS: fake fio failure is recorded, not called success
+PASS: real host action queues after release and receives mocked guest acknowledgement
+PASS: missing guest run marker rejects launch
+PASS: daemon SIGKILL during synthetic hold -> independent watchdog releases target
+PASS: bash syntax checks for every shipped script
+PASS: libbpf parsed the generated ELF and found all six programs (no load)
