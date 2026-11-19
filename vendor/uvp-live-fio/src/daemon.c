@@ -263,6 +263,29 @@ static int stop_intent(struct app *a)
     return a->control_fd>=0 && !bpf_map_lookup_elem(a->control_fd,&zero,&c) &&
            c.request_ns && c.signal_rc==0;
 }
+static int write_pipe_byte(int fd, char byte)
+{
+    ssize_t n;
+    do {
+        n = write(fd, &byte, 1);
+    } while (n < 0 && errno == EINTR);
+    if (n == 1) return 0;
+    if (n == 0) errno = EIO;
+    return -1;
+}
+static int close_watchdog_pipe(struct app *a)
+{
+    int rc = 0;
+    if (a->wdpipe < 0) return 0;
+    /* Without a confirmed release, EOF lets the watchdog recover a stop. */
+    if (a->released && write_pipe_byte(a->wdpipe, 'D')) {
+        perror("watchdog release notification");
+        rc = -1;
+    }
+    close(a->wdpipe);
+    a->wdpipe = -1;
+    return rc;
+}
 /* Independent bounded-hold watchdog. Release does not undo a host action.
  * It never kills QEMU. It does NOT recover kernel/hardware hangs. */
 static int start_watchdog(struct app *a)
@@ -487,9 +510,10 @@ static void cleanup(struct app *a)
         /* Avoid leaving a paused QEMU behind on ordinary errors/interrupts. */
         wait_for_stop(a);
         fprintf(stderr,"CLEANUP: SIGCONT only to our registered target; run failed\n");
-        signal_pidfd(a->pidfd,SIGCONT);
+        if (signal_pidfd(a->pidfd,SIGCONT)) perror("cleanup SIGCONT");
+        else a->released=true;
     }
-    if (a->wdpipe>=0) { (void)write(a->wdpipe,"D",1); close(a->wdpipe); }
+    close_watchdog_pipe(a);
     if (a->watchdog>0) waitpid(a->watchdog,NULL,0);
     if (a->mock>0) { signal_pidfd(a->pidfd,SIGKILL); waitpid(a->mock,NULL,0); }
     if (a->stats_fd>=0) {
@@ -561,7 +585,10 @@ int main(int argc,char **argv)
         a.event=(struct uvp_event){.version=UVP_VERSION,.testcase=a.cfg.testcase,
             .tgid=a.pid,.tid=a.pid,.epoch=a.cfg.epoch,
             .ctrl_instance=a.cfg.ctrl_instance,.cntlid=a.cfg.cntlid};
-        a.own_stop=true; (void)write(a.wdpipe,"I",1);
+        if (write_pipe_byte(a.wdpipe, 'I')) {
+            perror("watchdog stop-intent notification"); goto out;
+        }
+        a.own_stop=true;
         if (signal_pidfd(a.pidfd,SIGSTOP)) goto out;
         on_event(&a,&a.event,sizeof(a.event));
     }
@@ -603,8 +630,8 @@ int main(int argc,char **argv)
     a.released=true;
     printf("SIGCONT pid=%d host_mono_ms=%llu (guest may still be migration-paused)\n",
            a.pid,(unsigned long long)now_ms());
-    (void)write(a.wdpipe,"D",1); close(a.wdpipe); a.wdpipe=-1;
-    if(write(releasefd,"G",1)!=1) goto out;
+    if (close_watchdog_pipe(&a)) goto out;
+    if (write_pipe_byte(releasefd, 'G')) goto out;
     close(releasefd); releasefd=-1;
     if(await_action(&a)) goto out;
     puts("ACTION_ACKNOWLEDGED: inspect guest logs; this is NOT a migration/data-integrity PASS");

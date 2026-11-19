@@ -67,7 +67,7 @@ dfc90710a8ba19ca0b976ac85632ae496ced2c66a840f4570eebaf0fb3ec4ee9  vendor/uvp-liv
 49e786ac1c97aebf101071102c22b3d64815a3a9b96b647094147faae06e600a  vendor/uvp-live-fio/scripts/run-case.sh
 56629a4e6b18959b44064cbcadf3534b6bb369a53e74183b8d1fdf6687ea78f7  vendor/uvp-live-fio/scripts/start-fio.sh
 aff890862075bbc46179adbe195b52ca1138357b1daea50e2dd0abbaabd29e15  vendor/uvp-live-fio/scripts/verify-continuity.sh
-98018cc4edad2b5b3ab3e63f4ae8f80e62c0933802ea750810ed5f9ff5b52341  vendor/uvp-live-fio/src/daemon.c
+2a364a8cc970c6c1ffcd104aaf1203313888d196574c57dc3c5c1b77d1d2aa02  vendor/uvp-live-fio/src/daemon.c
 f4e0cec326c50f401ec4557ceef4a1f39a295b0cb11cfcc03c574ac9d9920bc7  vendor/uvp-live-fio/src/hooks.bpf.c
 febdf40253e03fb91a4c877a46388c3945893544f38b8d256483b78294f56365  vendor/uvp-live-fio/src/process.c
 5407fa4a19b83f8e913f2ddd70da0455c510c9330cc5bb1a92cd9e1135a80407  vendor/uvp-live-fio/tests/RESULTS.txt
